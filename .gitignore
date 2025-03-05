@@ -1,0 +1,96 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+data-env/
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.project
+.pydevproject
+.settings/
+*.sublime-workspace
+*.sublime-project
+
+# Logs and databases
+*.log
+*.sqlite
+*.db
+*.dat
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Project specific
+!endpoints/
+!endpoints/*.py
+!requirements.txt
+!README.md
+!LICENSE
+
+# Keep configuration template but ignore actual config
+endpoints/.env.example
+endpoints/*.env
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
+
+# Test coverage
+.coverage
+htmlcov/
+.tox/
+.nox/
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+#Example folders
+.github/
+.polygon/
+docs/
+examples/
+polygon/
+test_rest/
+test_websocket/
+

@@ -1,0 +1,47 @@
+[tool.poetry]
+name = "polygon-api-client"
+version = "0.0.0"
+description = "Official Polygon.io REST and Websocket client."
+authors = ["polygon.io"]
+license = "MIT"
+homepage = "https://polygon.io"
+repository = "https://github.com/polygon-io/client-python"
+documentation = "https://polygon.io/docs"
+keywords = [
+  "polygon",
+  "free",
+  "rest",
+  "stock",
+  "market",
+  "data",
+  "api",
+  "polygon.io",
+  "websocket",
+  "client"
+]
+packages = [
+  { include = "polygon" }
+]
+
+[tool.poetry.dependencies]
+python = "^3.8"
+urllib3 = ">=1.26.9,<3.0.0"
+websockets = ">=10.3,<15.0"
+certifi = ">=2022.5.18,<2026.0.0"
+
+[tool.poetry.dev-dependencies]
+black = "^24.8.0"
+mypy = "^1.13"
+types-urllib3 = "^1.26.25"
+Sphinx = "^7.1.2"
+sphinx-rtd-theme = "^3.0.2"
+# keep this in sync with docs/requirements.txt for readthedocs.org
+sphinx-autodoc-typehints = "^2.0.1"
+types-certifi = "^2021.10.8"
+types-setuptools = "^75.8.0"
+pook = "^2.0.1"
+orjson = "^3.10.15"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
