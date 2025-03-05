@@ -17,19 +17,32 @@ INDICATORS_SCHEMA = {
     "histogram": "Nullable(Float64)"  # For MACD
 }
 
-async def fetch_sma(ticker: str, window: int) -> List[Dict]:
+# Define window sizes for SMA and EMA
+SMA_WINDOWS = [5, 9, 12, 20, 50, 100, 200]
+EMA_WINDOWS = [9, 12, 20]
+
+async def fetch_sma(ticker: str, window: int, from_date: datetime, to_date: datetime) -> List[Dict]:
     """
-    Fetch Simple Moving Average for a ticker
+    Fetch Simple Moving Average for a ticker with specific window size
     """
     client = get_rest_client()
     indicators = []
     
     try:
+        # Format dates as YYYY-MM-DD
+        from_str = from_date.strftime("%Y-%m-%d")
+        to_str = to_date.strftime("%Y-%m-%d")
+        
         sma = client.get_sma(
             ticker=ticker,
-            timespan="minute",  # Changed to minute intervals
+            timespan="minute",
+            adjusted=True,
             window=window,
-            series_type=config.SERIES_TYPE
+            series_type="close",
+            timestamp_gte=from_str,
+            timestamp_lte=to_str,
+            order="asc",
+            limit=5000  # Polygon's maximum limit
         )
         
         for value in sma.values:
@@ -38,31 +51,40 @@ async def fetch_sma(ticker: str, window: int) -> List[Dict]:
             indicators.append({
                 "ticker": ticker,
                 "timestamp": timestamp,
-                "indicator_type": "SMA",
+                "indicator_type": f"SMA_{window}",
                 "window": window,
-                "value": value.value,
+                "value": float(value.value) if value.value is not None else 0.0,
                 "signal": None,
                 "histogram": None
             })
     except Exception as e:
-        print(f"Error fetching SMA for {ticker} with window {window}: {str(e)}")
+        print(f"Error fetching SMA_{window} for {ticker}: {str(e)}")
         return []
         
     return indicators
 
-async def fetch_ema(ticker: str, window: int) -> List[Dict]:
+async def fetch_ema(ticker: str, window: int, from_date: datetime, to_date: datetime) -> List[Dict]:
     """
-    Fetch Exponential Moving Average for a ticker
+    Fetch Exponential Moving Average for a ticker with specific window size
     """
     client = get_rest_client()
     indicators = []
     
     try:
+        # Format dates as YYYY-MM-DD
+        from_str = from_date.strftime("%Y-%m-%d")
+        to_str = to_date.strftime("%Y-%m-%d")
+        
         ema = client.get_ema(
             ticker=ticker,
-            timespan="minute",  # Changed to minute intervals
+            timespan="minute",
+            adjusted=True,
             window=window,
-            series_type=config.SERIES_TYPE
+            series_type="close",
+            timestamp_gte=from_str,
+            timestamp_lte=to_str,
+            order="asc",
+            limit=5000  # Polygon's maximum limit
         )
         
         for value in ema.values:
@@ -71,19 +93,19 @@ async def fetch_ema(ticker: str, window: int) -> List[Dict]:
             indicators.append({
                 "ticker": ticker,
                 "timestamp": timestamp,
-                "indicator_type": "EMA",
+                "indicator_type": f"EMA_{window}",
                 "window": window,
-                "value": value.value,
+                "value": float(value.value) if value.value is not None else 0.0,
                 "signal": None,
                 "histogram": None
             })
     except Exception as e:
-        print(f"Error fetching EMA for {ticker} with window {window}: {str(e)}")
+        print(f"Error fetching EMA_{window} for {ticker}: {str(e)}")
         return []
         
     return indicators
 
-async def fetch_macd(ticker: str) -> List[Dict]:
+async def fetch_macd(ticker: str, from_date: datetime, to_date: datetime) -> List[Dict]:
     """
     Fetch MACD for a ticker
     """
@@ -91,13 +113,22 @@ async def fetch_macd(ticker: str) -> List[Dict]:
     indicators = []
     
     try:
+        # Format dates as YYYY-MM-DD
+        from_str = from_date.strftime("%Y-%m-%d")
+        to_str = to_date.strftime("%Y-%m-%d")
+        
         macd = client.get_macd(
             ticker=ticker,
-            timespan="minute",  # Changed to minute intervals
+            timespan="minute",
+            adjusted=True,
             short_window=12,  # Standard MACD parameters
             long_window=26,
             signal_window=9,
-            series_type=config.SERIES_TYPE
+            series_type="close",
+            timestamp_gte=from_str,
+            timestamp_lte=to_str,
+            order="asc",
+            limit=5000  # Polygon's maximum limit
         )
         
         for value in macd.values:
@@ -108,9 +139,9 @@ async def fetch_macd(ticker: str) -> List[Dict]:
                 "timestamp": timestamp,
                 "indicator_type": "MACD",
                 "window": 0,  # Not applicable for MACD
-                "value": value.value,
-                "signal": value.signal,
-                "histogram": value.histogram
+                "value": float(value.value) if value.value is not None else 0.0,
+                "signal": float(value.signal) if value.signal is not None else 0.0,
+                "histogram": float(value.histogram) if value.histogram is not None else 0.0
             })
     except Exception as e:
         print(f"Error fetching MACD for {ticker}: {str(e)}")
@@ -118,7 +149,7 @@ async def fetch_macd(ticker: str) -> List[Dict]:
         
     return indicators
 
-async def fetch_rsi(ticker: str) -> List[Dict]:
+async def fetch_rsi(ticker: str, from_date: datetime, to_date: datetime) -> List[Dict]:
     """
     Fetch RSI for a ticker
     """
@@ -126,11 +157,20 @@ async def fetch_rsi(ticker: str) -> List[Dict]:
     indicators = []
     
     try:
+        # Format dates as YYYY-MM-DD
+        from_str = from_date.strftime("%Y-%m-%d")
+        to_str = to_date.strftime("%Y-%m-%d")
+        
         rsi = client.get_rsi(
             ticker=ticker,
-            timespan="minute",  # Changed to minute intervals
+            timespan="minute",
+            adjusted=True,
             window=14,  # Standard RSI window
-            series_type=config.SERIES_TYPE
+            series_type="close",
+            timestamp_gte=from_str,
+            timestamp_lte=to_str,
+            order="asc",
+            limit=5000  # Polygon's maximum limit
         )
         
         for value in rsi.values:
@@ -141,7 +181,7 @@ async def fetch_rsi(ticker: str) -> List[Dict]:
                 "timestamp": timestamp,
                 "indicator_type": "RSI",
                 "window": 14,
-                "value": value.value,
+                "value": float(value.value) if value.value is not None else 0.0,
                 "signal": None,
                 "histogram": None
             })
@@ -151,29 +191,41 @@ async def fetch_rsi(ticker: str) -> List[Dict]:
         
     return indicators
 
-async def fetch_all_indicators(ticker: str) -> List[Dict]:
+async def fetch_all_indicators(ticker: str, from_date: datetime, to_date: datetime) -> List[Dict]:
     """
     Fetch all technical indicators for a ticker
     """
     indicators = []
     
     # Fetch SMA for different windows
-    for window in config.SMA_WINDOWS:
-        sma_data = await fetch_sma(ticker, window)
+    for window in SMA_WINDOWS:
+        print(f"Fetching SMA_{window} for {ticker}...")
+        sma_data = await fetch_sma(ticker, window, from_date, to_date)
         indicators.extend(sma_data)
+        if sma_data:
+            print(f"Found {len(sma_data)} SMA_{window} values")
     
     # Fetch EMA for different windows
-    for window in config.EMA_WINDOWS:
-        ema_data = await fetch_ema(ticker, window)
+    for window in EMA_WINDOWS:
+        print(f"Fetching EMA_{window} for {ticker}...")
+        ema_data = await fetch_ema(ticker, window, from_date, to_date)
         indicators.extend(ema_data)
+        if ema_data:
+            print(f"Found {len(ema_data)} EMA_{window} values")
     
     # Fetch MACD
-    macd_data = await fetch_macd(ticker)
+    print(f"Fetching MACD for {ticker}...")
+    macd_data = await fetch_macd(ticker, from_date, to_date)
     indicators.extend(macd_data)
+    if macd_data:
+        print(f"Found {len(macd_data)} MACD values")
     
     # Fetch RSI
-    rsi_data = await fetch_rsi(ticker)
+    print(f"Fetching RSI for {ticker}...")
+    rsi_data = await fetch_rsi(ticker, from_date, to_date)
     indicators.extend(rsi_data)
+    if rsi_data:
+        print(f"Found {len(rsi_data)} RSI values")
     
     return indicators
 

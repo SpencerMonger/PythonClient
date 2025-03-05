@@ -74,7 +74,7 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
         
         # Fetch and store technical indicators
         print(f"\nFetching technical indicators for {ticker}...")
-        indicator_data = await indicators.fetch_all_indicators(ticker)
+        indicator_data = await indicators.fetch_all_indicators(ticker, from_date, to_date)
         if indicator_data:
             print(f"Found {len(indicator_data)} indicators")
             print("Storing indicator data...")

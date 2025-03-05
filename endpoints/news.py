@@ -21,6 +21,18 @@ NEWS_SCHEMA = {
     "keywords": "Array(String)"
 }
 
+def parse_utc_timestamp(timestamp_str: str) -> datetime:
+    """
+    Parse UTC timestamp from Polygon format to datetime
+    """
+    try:
+        # Remove the 'Z' and parse
+        if timestamp_str.endswith('Z'):
+            timestamp_str = timestamp_str[:-1]
+        return datetime.fromisoformat(timestamp_str)
+    except (ValueError, AttributeError):
+        return datetime.utcnow()
+
 async def fetch_news(ticker: str) -> List[Dict]:
     """
     Fetch news for a ticker
@@ -35,12 +47,14 @@ async def fetch_news(ticker: str) -> List[Dict]:
             limit=1000
         ):
             # Handle potential None values and ensure proper types
+            published_utc = parse_utc_timestamp(news.published_utc) if news.published_utc else datetime.utcnow()
+            
             news_items.append({
                 "id": str(news.id) if news.id else "",
                 "publisher": news.publisher.name if news.publisher and hasattr(news.publisher, 'name') else "",
                 "title": str(news.title) if news.title else "",
                 "author": str(news.author) if news.author else "",
-                "published_utc": news.published_utc if news.published_utc else datetime.utcnow(),
+                "published_utc": published_utc,
                 "article_url": str(news.article_url) if news.article_url else "",
                 "tickers": news.tickers if news.tickers else [],
                 "amp_url": str(news.amp_url) if news.amp_url else "",

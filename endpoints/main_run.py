@@ -4,6 +4,6 @@ import asyncio
 
 tickers = ["AAPL", "AMZN"]  # Add your tickers
 from_date = datetime(2025, 2, 3)
-to_date = datetime(2025, 2, 7)
+to_date = datetime(2025, 2, 4)
 
 asyncio.run(main(tickers, from_date, to_date))
