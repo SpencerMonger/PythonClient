@@ -34,18 +34,19 @@ async def fetch_news(ticker: str) -> List[Dict]:
             order="desc",
             limit=1000
         ):
+            # Handle potential None values and ensure proper types
             news_items.append({
-                "id": news.id,
-                "publisher": news.publisher.name,
-                "title": news.title,
-                "author": news.author,
-                "published_utc": news.published_utc,
-                "article_url": news.article_url,
-                "tickers": news.tickers,
-                "amp_url": news.amp_url,
-                "image_url": news.image_url,
-                "description": news.description,
-                "keywords": news.keywords
+                "id": str(news.id) if news.id else "",
+                "publisher": news.publisher.name if news.publisher and hasattr(news.publisher, 'name') else "",
+                "title": str(news.title) if news.title else "",
+                "author": str(news.author) if news.author else "",
+                "published_utc": news.published_utc if news.published_utc else datetime.utcnow(),
+                "article_url": str(news.article_url) if news.article_url else "",
+                "tickers": news.tickers if news.tickers else [],
+                "amp_url": str(news.amp_url) if news.amp_url else "",
+                "image_url": str(news.image_url) if news.image_url else "",
+                "description": str(news.description) if news.description else "",
+                "keywords": news.keywords if news.keywords else []
             })
     except Exception as e:
         print(f"Error fetching news for {ticker}: {str(e)}")

@@ -18,12 +18,6 @@ def main():
         print("Dropping stock_news table...")
         db.drop_table_if_exists('stock_news')
 
-        print("Dropping stock_prices table...")
-        db.drop_table_if_exists('stock_prices')
-
-        print("Dropping stock_technical_indicators table...")
-        db.drop_table_if_exists('stock_technical_indicators')
-
         print("All tables dropped successfully!")
     finally:
         db.close()

@@ -39,10 +39,13 @@ async def fetch_bars(ticker: str, from_date: datetime, to_date: datetime) -> Lis
             to=to_str,
             limit=50000
         ):
+            # Convert timestamp from milliseconds to datetime
+            timestamp = datetime.fromtimestamp(bar.timestamp / 1000.0)
+            
             # Convert any potential None values to appropriate types
             bars.append({
                 "ticker": ticker,
-                "timestamp": bar.timestamp,
+                "timestamp": timestamp,
                 "open": float(bar.open) if bar.open is not None else None,
                 "high": float(bar.high) if bar.high is not None else None,
                 "low": float(bar.low) if bar.low is not None else None,

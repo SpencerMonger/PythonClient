@@ -27,15 +27,17 @@ async def fetch_sma(ticker: str, window: int) -> List[Dict]:
     try:
         sma = client.get_sma(
             ticker=ticker,
-            timespan=config.TIMESPAN,
+            timespan="minute",  # Changed to minute intervals
             window=window,
             series_type=config.SERIES_TYPE
         )
         
         for value in sma.values:
+            # Convert timestamp from milliseconds to datetime
+            timestamp = datetime.fromtimestamp(value.timestamp / 1000.0)
             indicators.append({
                 "ticker": ticker,
-                "timestamp": value.timestamp,
+                "timestamp": timestamp,
                 "indicator_type": "SMA",
                 "window": window,
                 "value": value.value,
@@ -58,15 +60,17 @@ async def fetch_ema(ticker: str, window: int) -> List[Dict]:
     try:
         ema = client.get_ema(
             ticker=ticker,
-            timespan=config.TIMESPAN,
+            timespan="minute",  # Changed to minute intervals
             window=window,
             series_type=config.SERIES_TYPE
         )
         
         for value in ema.values:
+            # Convert timestamp from milliseconds to datetime
+            timestamp = datetime.fromtimestamp(value.timestamp / 1000.0)
             indicators.append({
                 "ticker": ticker,
-                "timestamp": value.timestamp,
+                "timestamp": timestamp,
                 "indicator_type": "EMA",
                 "window": window,
                 "value": value.value,
@@ -89,7 +93,7 @@ async def fetch_macd(ticker: str) -> List[Dict]:
     try:
         macd = client.get_macd(
             ticker=ticker,
-            timespan=config.TIMESPAN,
+            timespan="minute",  # Changed to minute intervals
             short_window=12,  # Standard MACD parameters
             long_window=26,
             signal_window=9,
@@ -97,9 +101,11 @@ async def fetch_macd(ticker: str) -> List[Dict]:
         )
         
         for value in macd.values:
+            # Convert timestamp from milliseconds to datetime
+            timestamp = datetime.fromtimestamp(value.timestamp / 1000.0)
             indicators.append({
                 "ticker": ticker,
-                "timestamp": value.timestamp,
+                "timestamp": timestamp,
                 "indicator_type": "MACD",
                 "window": 0,  # Not applicable for MACD
                 "value": value.value,
@@ -122,15 +128,17 @@ async def fetch_rsi(ticker: str) -> List[Dict]:
     try:
         rsi = client.get_rsi(
             ticker=ticker,
-            timespan=config.TIMESPAN,
+            timespan="minute",  # Changed to minute intervals
             window=14,  # Standard RSI window
             series_type=config.SERIES_TYPE
         )
         
         for value in rsi.values:
+            # Convert timestamp from milliseconds to datetime
+            timestamp = datetime.fromtimestamp(value.timestamp / 1000.0)
             indicators.append({
                 "ticker": ticker,
-                "timestamp": value.timestamp,
+                "timestamp": timestamp,
                 "indicator_type": "RSI",
                 "window": 14,
                 "value": value.value,
