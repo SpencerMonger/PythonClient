@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from typing import List
 
 from endpoints.db import ClickHouseDB
-from endpoints import bars, trades, quotes, news, indicators
+from endpoints import bars, trades, quotes, news, indicators, master
 
 async def init_tables(db: ClickHouseDB) -> None:
     """
@@ -14,55 +14,60 @@ async def init_tables(db: ClickHouseDB) -> None:
     await quotes.init_quotes_table(db)
     await news.init_news_table(db)
     await indicators.init_indicators_table(db)
+    await master.init_master_table(db)  # Initialize the master table last
+
+async def init_master_only(db: ClickHouseDB) -> None:
+    """
+    Initialize only the master table, assuming other tables already exist
+    """
+    try:
+        print("\nInitializing master table...")
+        await master.init_master_table(db)
+        print("Master table initialized successfully")
+    except Exception as e:
+        print(f"Error initializing master table: {str(e)}")
+        raise e
 
 async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_date: datetime) -> None:
     """
-    Process all data for a single ticker
+    Process all data for a ticker between dates
     """
     try:
         # Fetch and store bar data
-        print(f"Fetching bar data for {ticker}...")
+        print(f"\nFetching bar data for {ticker}...")
         bar_data = await bars.fetch_bars(ticker, from_date, to_date)
         if bar_data:
-            print(f"Found {len(bar_data)} bars for {ticker}")
+            print(f"Found {len(bar_data)} bars")
             print("Storing bar data...")
             await bars.store_bars(db, bar_data)
             print("Bar data stored successfully")
         else:
-            print(f"No bar data found for {ticker}")
-    
-        # Process each day in the date range for trades and quotes
-        current_date = from_date
-        while current_date <= to_date:
-            date_str = current_date.strftime("%Y-%m-%d")
-            print(f"\nProcessing data for {ticker} on {date_str}")
-            
-            # Fetch and store trades
-            print("Fetching trades...")
-            trade_data = await trades.fetch_trades(ticker, current_date)
-            if trade_data:
-                print(f"Found {len(trade_data)} trades")
-                print("Storing trade data...")
-                await trades.store_trades(db, trade_data)
-                print("Trade data stored successfully")
-            else:
-                print("No trade data found")
-            
-            # Fetch and store quotes
-            print("Fetching quotes...")
-            quote_data = await quotes.fetch_quotes(ticker, current_date)
-            if quote_data:
-                print(f"Found {len(quote_data)} quotes")
-                print("Storing quote data...")
-                await quotes.store_quotes(db, quote_data)
-                print("Quote data stored successfully")
-            else:
-                print("No quote data found")
-                
-            current_date += timedelta(days=1)
+            print("No bar data found")
         
-        # Fetch and store news
-        print(f"\nFetching news for {ticker}...")
+        # Fetch and store trade data
+        print(f"\nFetching trade data for {ticker}...")
+        trade_data = await trades.fetch_trades(ticker, from_date)
+        if trade_data:
+            print(f"Found {len(trade_data)} trades")
+            print("Storing trade data...")
+            await trades.store_trades(db, trade_data)
+            print("Trade data stored successfully")
+        else:
+            print("No trade data found")
+        
+        # Fetch and store quote data
+        print(f"\nFetching quote data for {ticker}...")
+        quote_data = await quotes.fetch_quotes(ticker, from_date)
+        if quote_data:
+            print(f"Found {len(quote_data)} quotes")
+            print("Storing quote data...")
+            await quotes.store_quotes(db, quote_data)
+            print("Quote data stored successfully")
+        else:
+            print("No quote data found")
+        
+        # Fetch and store news data
+        print(f"\nFetching news data for {ticker}...")
         news_data = await news.fetch_news(ticker)
         if news_data:
             print(f"Found {len(news_data)} news items")
@@ -116,9 +121,9 @@ async def main(tickers: List[str], from_date: datetime, to_date: datetime) -> No
         print("Database connection closed")
 
 if __name__ == "__main__":
-    # Example usage
-    tickers = ["AAPL", "MSFT", "GOOGL"]  # Add your tickers here
-    from_date = datetime(2024, 1, 1)
-    to_date = datetime(2024, 3, 15)
-    
-    asyncio.run(main(tickers, from_date, to_date)) 
+    # Example usage for creating just the master table
+    db = ClickHouseDB()
+    try:
+        asyncio.run(init_master_only(db))
+    finally:
+        db.close() 
