@@ -20,6 +20,10 @@ MASTER_SCHEMA = {
     "vwap": "Nullable(Float64)",
     "transactions": "Nullable(Int64)",
     
+    # Custom metrics
+    "price_diff": "Nullable(Float64)",  # Percentage difference with price 15 minutes later
+    "target": "Nullable(Int32)",  # Classification of price_diff into categories
+    
     # Aggregated fields from stock_quotes (per minute)
     "avg_bid_price": "Nullable(Float64)",
     "avg_ask_price": "Nullable(Float64)",
@@ -145,6 +149,24 @@ async def populate_master_table(db: ClickHouseDB) -> None:
             FROM {db.database}.stock_news
             ARRAY JOIN tickers AS ticker
             GROUP BY ticker, timestamp
+        ),
+
+        -- Calculate price differences and targets
+        price_metrics AS (
+            SELECT 
+                ticker,
+                timestamp,
+                close,
+                ((any(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 15 FOLLOWING AND 15 FOLLOWING) - close) / close) * 100 AS price_diff,
+                multiIf(
+                    ((any(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 15 FOLLOWING AND 15 FOLLOWING) - close) / close) * 100 <= -1, 0,
+                    ((any(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 15 FOLLOWING AND 15 FOLLOWING) - close) / close) * 100 <= -0.5, 1,
+                    ((any(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 15 FOLLOWING AND 15 FOLLOWING) - close) / close) * 100 <= 0, 2,
+                    ((any(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 15 FOLLOWING AND 15 FOLLOWING) - close) / close) * 100 <= 0.5, 3,
+                    ((any(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 15 FOLLOWING AND 15 FOLLOWING) - close) / close) * 100 <= 1, 4,
+                    5
+                ) AS target
+            FROM {db.database}.stock_bars
         )
         
         SELECT
@@ -157,6 +179,8 @@ async def populate_master_table(db: ClickHouseDB) -> None:
             b.volume,
             b.vwap,
             b.transactions,
+            p.price_diff,
+            p.target,
             q.avg_bid_price,
             q.avg_ask_price,
             q.min_bid_price,
@@ -193,6 +217,7 @@ async def populate_master_table(db: ClickHouseDB) -> None:
             n.latest_news_title,
             n.latest_news_url
         FROM {db.database}.stock_bars b
+        LEFT JOIN price_metrics p ON b.ticker = p.ticker AND b.timestamp = p.timestamp
         LEFT JOIN minute_quotes q ON b.ticker = q.ticker AND b.timestamp = q.timestamp
         LEFT JOIN minute_trades t ON b.ticker = t.ticker AND b.timestamp = t.timestamp
         LEFT JOIN pivoted_indicators i ON b.ticker = i.ticker AND b.timestamp = i.timestamp
@@ -211,8 +236,16 @@ async def create_master_table(db: ClickHouseDB) -> None:
     Create the master stock data table that combines all other tables
     """
     try:
-        # Create the master table
-        db.create_table_if_not_exists(config.TABLE_STOCK_MASTER, MASTER_SCHEMA)
+        # Create the master table with timestamp ordering
+        columns_def = ", ".join(f"{col} {type_}" for col, type_ in MASTER_SCHEMA.items())
+        create_table_query = f"""
+        CREATE TABLE IF NOT EXISTS {db.database}.{config.TABLE_STOCK_MASTER} (
+            {columns_def}
+        ) ENGINE = MergeTree()
+        ORDER BY (ticker, timestamp)
+        """
+        db.client.command(create_table_query)
+        print("Created master table successfully")
         
         # Create the materialized view that will populate the master table
         view_query = f"""
@@ -290,6 +323,24 @@ async def create_master_table(db: ClickHouseDB) -> None:
             FROM {db.database}.stock_news
             ARRAY JOIN tickers AS ticker
             GROUP BY ticker, timestamp
+        ),
+
+        -- Calculate price differences and targets
+        price_metrics AS (
+            SELECT 
+                ticker,
+                timestamp,
+                close,
+                ((any(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 15 FOLLOWING AND 15 FOLLOWING) - close) / close) * 100 AS price_diff,
+                multiIf(
+                    ((any(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 15 FOLLOWING AND 15 FOLLOWING) - close) / close) * 100 <= -1, 0,
+                    ((any(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 15 FOLLOWING AND 15 FOLLOWING) - close) / close) * 100 <= -0.5, 1,
+                    ((any(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 15 FOLLOWING AND 15 FOLLOWING) - close) / close) * 100 <= 0, 2,
+                    ((any(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 15 FOLLOWING AND 15 FOLLOWING) - close) / close) * 100 <= 0.5, 3,
+                    ((any(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 15 FOLLOWING AND 15 FOLLOWING) - close) / close) * 100 <= 1, 4,
+                    5
+                ) AS target
+            FROM {db.database}.stock_bars
         )
         
         SELECT
@@ -302,6 +353,8 @@ async def create_master_table(db: ClickHouseDB) -> None:
             b.volume,
             b.vwap,
             b.transactions,
+            p.price_diff,
+            p.target,
             q.avg_bid_price,
             q.avg_ask_price,
             q.min_bid_price,
@@ -338,6 +391,7 @@ async def create_master_table(db: ClickHouseDB) -> None:
             n.latest_news_title,
             n.latest_news_url
         FROM {db.database}.stock_bars b
+        LEFT JOIN price_metrics p ON b.ticker = p.ticker AND b.timestamp = p.timestamp
         LEFT JOIN minute_quotes q ON b.ticker = q.ticker AND b.timestamp = q.timestamp
         LEFT JOIN minute_trades t ON b.ticker = t.ticker AND b.timestamp = t.timestamp
         LEFT JOIN pivoted_indicators i ON b.ticker = i.ticker AND b.timestamp = i.timestamp
