@@ -65,7 +65,16 @@ MASTER_SCHEMA = {
     # Fields from stock_news (latest news in the minute)
     "latest_news_id": "Nullable(String)",
     "latest_news_title": "Nullable(String)",
-    "latest_news_url": "Nullable(String)"
+    "latest_news_url": "Nullable(String)",
+    
+    # True Range and ATR metrics
+    "daily_high": "Nullable(Float64)",
+    "daily_low": "Nullable(Float64)",
+    "tr_current": "Nullable(Float64)",
+    "tr_high_close": "Nullable(Float64)",
+    "tr_low_close": "Nullable(Float64)",
+    "tr_value": "Nullable(Float64)",
+    "atr_value": "Nullable(Float64)"
 }
 
 async def populate_master_table(db: ClickHouseDB) -> None:
@@ -167,6 +176,58 @@ async def populate_master_table(db: ClickHouseDB) -> None:
                     5
                 ) AS target
             FROM {db.database}.stock_bars
+        ),
+
+        -- Calculate daily high/low and TR metrics
+        tr_metrics AS (
+            WITH
+            daily_closes AS (
+                SELECT
+                    sb1.ticker as ticker,
+                    sb1.timestamp as timestamp,
+                    sb1.close as close,
+                    toDate(sb1.timestamp) AS trade_date
+                FROM {db.database}.stock_bars sb1
+                WHERE formatDateTime(sb1.timestamp, '%H:%M:%S') = '21:00:00'
+            ),
+            daily_values AS (
+                SELECT
+                    sb2.ticker,
+                    sb2.timestamp,
+                    toDate(sb2.timestamp) as trade_date,
+                    max(sb2.high) OVER (PARTITION BY sb2.ticker, toDate(sb2.timestamp)) as daily_high,
+                    min(sb2.low) OVER (PARTITION BY sb2.ticker, toDate(sb2.timestamp)) as daily_low,
+                    first_value(dc.close) OVER (
+                        PARTITION BY sb2.ticker, toDate(sb2.timestamp)
+                        ORDER BY dc.timestamp DESC
+                    ) as prev_close
+                FROM {db.database}.stock_bars sb2
+                LEFT JOIN daily_closes dc ON sb2.ticker = dc.ticker 
+                    AND toDate(sb2.timestamp) = toDate(dc.timestamp) + INTERVAL 1 DAY
+            )
+            SELECT DISTINCT
+                dv.ticker,
+                dv.timestamp,
+                dv.daily_high,
+                dv.daily_low,
+                dv.daily_high - dv.daily_low AS tr_current,
+                dv.daily_high - dv.prev_close AS tr_high_close,
+                dv.daily_low - dv.prev_close AS tr_low_close,
+                greatest(
+                    dv.daily_high - dv.daily_low,
+                    abs(dv.daily_high - dv.prev_close),
+                    abs(dv.daily_low - dv.prev_close)
+                ) AS tr_value,
+                avg(greatest(
+                    dv.daily_high - dv.daily_low,
+                    abs(dv.daily_high - dv.prev_close),
+                    abs(dv.daily_low - dv.prev_close)
+                )) OVER (
+                    PARTITION BY dv.ticker 
+                    ORDER BY dv.timestamp 
+                    ROWS BETWEEN 13 PRECEDING AND CURRENT ROW
+                ) AS atr_value
+            FROM daily_values dv
         )
         
         SELECT
@@ -215,13 +276,21 @@ async def populate_master_table(db: ClickHouseDB) -> None:
             i.rsi_14,
             n.latest_news_id,
             n.latest_news_title,
-            n.latest_news_url
+            n.latest_news_url,
+            tr.daily_high,
+            tr.daily_low,
+            tr.tr_current,
+            tr.tr_high_close,
+            tr.tr_low_close,
+            tr.tr_value,
+            tr.atr_value
         FROM {db.database}.stock_bars b
         LEFT JOIN price_metrics p ON b.ticker = p.ticker AND b.timestamp = p.timestamp
         LEFT JOIN minute_quotes q ON b.ticker = q.ticker AND b.timestamp = q.timestamp
         LEFT JOIN minute_trades t ON b.ticker = t.ticker AND b.timestamp = t.timestamp
         LEFT JOIN pivoted_indicators i ON b.ticker = i.ticker AND b.timestamp = i.timestamp
         LEFT JOIN latest_news n ON b.ticker = n.ticker AND b.timestamp = n.timestamp
+        LEFT JOIN tr_metrics tr ON b.ticker = tr.ticker AND b.timestamp = tr.timestamp
         """
         
         db.client.command(query)
@@ -341,6 +410,58 @@ async def create_master_table(db: ClickHouseDB) -> None:
                     5
                 ) AS target
             FROM {db.database}.stock_bars
+        ),
+
+        -- Calculate daily high/low and TR metrics
+        tr_metrics AS (
+            WITH
+            daily_closes AS (
+                SELECT
+                    sb1.ticker as ticker,
+                    sb1.timestamp as timestamp,
+                    sb1.close as close,
+                    toDate(sb1.timestamp) AS trade_date
+                FROM {db.database}.stock_bars sb1
+                WHERE formatDateTime(sb1.timestamp, '%H:%M:%S') = '21:00:00'
+            ),
+            daily_values AS (
+                SELECT
+                    sb2.ticker,
+                    sb2.timestamp,
+                    toDate(sb2.timestamp) as trade_date,
+                    max(sb2.high) OVER (PARTITION BY sb2.ticker, toDate(sb2.timestamp)) as daily_high,
+                    min(sb2.low) OVER (PARTITION BY sb2.ticker, toDate(sb2.timestamp)) as daily_low,
+                    first_value(dc.close) OVER (
+                        PARTITION BY sb2.ticker, toDate(sb2.timestamp)
+                        ORDER BY dc.timestamp DESC
+                    ) as prev_close
+                FROM {db.database}.stock_bars sb2
+                LEFT JOIN daily_closes dc ON sb2.ticker = dc.ticker 
+                    AND toDate(sb2.timestamp) = toDate(dc.timestamp) + INTERVAL 1 DAY
+            )
+            SELECT DISTINCT
+                dv.ticker,
+                dv.timestamp,
+                dv.daily_high,
+                dv.daily_low,
+                dv.daily_high - dv.daily_low AS tr_current,
+                dv.daily_high - dv.prev_close AS tr_high_close,
+                dv.daily_low - dv.prev_close AS tr_low_close,
+                greatest(
+                    dv.daily_high - dv.daily_low,
+                    abs(dv.daily_high - dv.prev_close),
+                    abs(dv.daily_low - dv.prev_close)
+                ) AS tr_value,
+                avg(greatest(
+                    dv.daily_high - dv.daily_low,
+                    abs(dv.daily_high - dv.prev_close),
+                    abs(dv.daily_low - dv.prev_close)
+                )) OVER (
+                    PARTITION BY dv.ticker 
+                    ORDER BY dv.timestamp 
+                    ROWS BETWEEN 13 PRECEDING AND CURRENT ROW
+                ) AS atr_value
+            FROM daily_values dv
         )
         
         SELECT
@@ -389,13 +510,21 @@ async def create_master_table(db: ClickHouseDB) -> None:
             i.rsi_14,
             n.latest_news_id,
             n.latest_news_title,
-            n.latest_news_url
+            n.latest_news_url,
+            tr.daily_high,
+            tr.daily_low,
+            tr.tr_current,
+            tr.tr_high_close,
+            tr.tr_low_close,
+            tr.tr_value,
+            tr.atr_value
         FROM {db.database}.stock_bars b
         LEFT JOIN price_metrics p ON b.ticker = p.ticker AND b.timestamp = p.timestamp
         LEFT JOIN minute_quotes q ON b.ticker = q.ticker AND b.timestamp = q.timestamp
         LEFT JOIN minute_trades t ON b.ticker = t.ticker AND b.timestamp = t.timestamp
         LEFT JOIN pivoted_indicators i ON b.ticker = i.ticker AND b.timestamp = i.timestamp
         LEFT JOIN latest_news n ON b.ticker = n.ticker AND b.timestamp = n.timestamp
+        LEFT JOIN tr_metrics tr ON b.ticker = tr.ticker AND b.timestamp = tr.timestamp
         """
         
         db.client.command(view_query)
