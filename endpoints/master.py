@@ -28,6 +28,10 @@ MASTER_SCHEMA = {
     "total_bid_size": "Nullable(Float64)",
     "total_ask_size": "Nullable(Float64)",
     "quote_count": "Nullable(Int32)",
+    "quote_conditions": "Array(Int32)",
+    "ask_exchange": "Nullable(Int32)",
+    "bid_exchange": "Nullable(Int32)",
+    "quote_indicators": "Array(Int32)",
     
     # Aggregated fields from stock_trades (per minute)
     "avg_trade_price": "Nullable(Float64)",
@@ -35,6 +39,8 @@ MASTER_SCHEMA = {
     "max_trade_price": "Nullable(Float64)",
     "total_trade_size": "Nullable(Int32)",
     "trade_count": "Nullable(Int32)",
+    "trade_conditions": "Array(Int32)",
+    "trade_exchange": "Nullable(Int32)",
     
     # Fields from stock_indicators
     "sma_5": "Nullable(Float64)",
@@ -69,7 +75,7 @@ async def populate_master_table(db: ClickHouseDB) -> None:
         query = f"""
         INSERT INTO {db.database}.{config.TABLE_STOCK_MASTER}
         WITH 
-        -- Convert quotes timestamps to minute intervals
+        -- Convert quotes timestamps to minute intervals and concatenate arrays
         minute_quotes AS (
             SELECT
                 ticker,
@@ -80,12 +86,16 @@ async def populate_master_table(db: ClickHouseDB) -> None:
                 max(ask_price) AS max_ask_price,
                 sum(bid_size) AS total_bid_size,
                 sum(ask_size) AS total_ask_size,
-                count(*) AS quote_count
+                count(*) AS quote_count,
+                arrayFlatten([coalesce(groupArray(conditions), [])]) AS quote_conditions,
+                argMax(ask_exchange, sip_timestamp) AS ask_exchange,
+                argMax(bid_exchange, sip_timestamp) AS bid_exchange,
+                arrayFlatten([coalesce(groupArray(indicators), [])]) AS quote_indicators
             FROM {db.database}.stock_quotes
             GROUP BY ticker, timestamp
         ),
         
-        -- Convert trades timestamps to minute intervals
+        -- Convert trades timestamps to minute intervals and concatenate arrays
         minute_trades AS (
             SELECT
                 ticker,
@@ -94,7 +104,9 @@ async def populate_master_table(db: ClickHouseDB) -> None:
                 min(price) AS min_trade_price,
                 max(price) AS max_trade_price,
                 sum(size) AS total_trade_size,
-                count(*) AS trade_count
+                count(*) AS trade_count,
+                arrayFlatten([coalesce(groupArray(conditions), [])]) AS trade_conditions,
+                argMax(exchange, sip_timestamp) AS trade_exchange
             FROM {db.database}.stock_trades
             GROUP BY ticker, timestamp
         ),
@@ -152,11 +164,17 @@ async def populate_master_table(db: ClickHouseDB) -> None:
             q.total_bid_size,
             q.total_ask_size,
             q.quote_count,
+            q.quote_conditions,
+            q.ask_exchange,
+            q.bid_exchange,
+            q.quote_indicators,
             t.avg_trade_price,
             t.min_trade_price,
             t.max_trade_price,
             t.total_trade_size,
             t.trade_count,
+            t.trade_conditions,
+            t.trade_exchange,
             i.sma_5,
             i.sma_9,
             i.sma_12,
@@ -202,7 +220,7 @@ async def create_master_table(db: ClickHouseDB) -> None:
         TO {db.database}.stock_master
         AS
         WITH 
-        -- Convert quotes timestamps to minute intervals
+        -- Convert quotes timestamps to minute intervals and concatenate arrays
         minute_quotes AS (
             SELECT
                 ticker,
@@ -213,12 +231,16 @@ async def create_master_table(db: ClickHouseDB) -> None:
                 max(ask_price) AS max_ask_price,
                 sum(bid_size) AS total_bid_size,
                 sum(ask_size) AS total_ask_size,
-                count(*) AS quote_count
+                count(*) AS quote_count,
+                arrayFlatten([coalesce(groupArray(conditions), [])]) AS quote_conditions,
+                argMax(ask_exchange, sip_timestamp) AS ask_exchange,
+                argMax(bid_exchange, sip_timestamp) AS bid_exchange,
+                arrayFlatten([coalesce(groupArray(indicators), [])]) AS quote_indicators
             FROM {db.database}.stock_quotes
             GROUP BY ticker, timestamp
         ),
         
-        -- Convert trades timestamps to minute intervals
+        -- Convert trades timestamps to minute intervals and concatenate arrays
         minute_trades AS (
             SELECT
                 ticker,
@@ -227,7 +249,9 @@ async def create_master_table(db: ClickHouseDB) -> None:
                 min(price) AS min_trade_price,
                 max(price) AS max_trade_price,
                 sum(size) AS total_trade_size,
-                count(*) AS trade_count
+                count(*) AS trade_count,
+                arrayFlatten([coalesce(groupArray(conditions), [])]) AS trade_conditions,
+                argMax(exchange, sip_timestamp) AS trade_exchange
             FROM {db.database}.stock_trades
             GROUP BY ticker, timestamp
         ),
@@ -285,11 +309,17 @@ async def create_master_table(db: ClickHouseDB) -> None:
             q.total_bid_size,
             q.total_ask_size,
             q.quote_count,
+            q.quote_conditions,
+            q.ask_exchange,
+            q.bid_exchange,
+            q.quote_indicators,
             t.avg_trade_price,
             t.min_trade_price,
             t.max_trade_price,
             t.total_trade_size,
             t.trade_count,
+            t.trade_conditions,
+            t.trade_exchange,
             i.sma_5,
             i.sma_9,
             i.sma_12,
