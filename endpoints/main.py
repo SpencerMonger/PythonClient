@@ -3,13 +3,14 @@ from datetime import datetime, timedelta
 from typing import List
 
 from endpoints.db import ClickHouseDB
-from endpoints import bars, trades, quotes, news, indicators, master
+from endpoints import bars, trades, quotes, news, indicators, master, bars_daily
 
 async def init_tables(db: ClickHouseDB) -> None:
     """
     Initialize all tables in ClickHouse
     """
     await bars.init_bars_table(db)
+    await bars_daily.init_bars_table(db)  # Initialize daily bars table
     await trades.init_trades_table(db)
     await quotes.init_quotes_table(db)
     await news.init_news_table(db)
@@ -43,6 +44,17 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
             print("Bar data stored successfully")
         else:
             print("No bar data found")
+        
+        # Fetch and store daily bar data
+        print(f"\nFetching daily bar data for {ticker}...")
+        daily_bar_data = await bars_daily.fetch_bars(ticker, from_date, to_date)
+        if daily_bar_data:
+            print(f"Found {len(daily_bar_data)} daily bars")
+            print("Storing daily bar data...")
+            await bars_daily.store_bars(db, daily_bar_data)
+            print("Daily bar data stored successfully")
+        else:
+            print("No daily bar data found")
         
         # Fetch and store trade data
         print(f"\nFetching trade data for {ticker}...")

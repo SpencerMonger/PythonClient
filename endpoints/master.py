@@ -69,7 +69,8 @@ MASTER_SCHEMA = {
     
     # Daily high/low metrics
     "daily_high": "Nullable(Float64)",
-    "daily_low": "Nullable(Float64)"
+    "daily_low": "Nullable(Float64)",
+    "previous_close": "Nullable(Float64)"  # Previous day's closing price
 }
 
 async def populate_master_table(db: ClickHouseDB) -> None:
@@ -181,6 +182,54 @@ async def populate_master_table(db: ClickHouseDB) -> None:
                 max(high) OVER (PARTITION BY ticker, toDate(timestamp)) as daily_high,
                 min(low) OVER (PARTITION BY ticker, toDate(timestamp)) as daily_low
             FROM {db.database}.stock_bars
+        ),
+
+        -- Get previous day's closing price from daily bars
+        previous_close_metrics AS (
+            WITH RECURSIVE 
+            -- First get all possible dates we need to look up
+            dates AS (
+                SELECT DISTINCT
+                    ticker,
+                    timestamp,
+                    toDate(timestamp) as current_date
+                FROM {db.database}.stock_bars
+            ),
+            -- Recursively look back through dates until we find a close price
+            previous_closes AS (
+                SELECT
+                    d.ticker,
+                    d.timestamp,
+                    d.current_date,
+                    sd.close as found_close,
+                    1 as depth
+                FROM dates d
+                LEFT JOIN {db.database}.stock_daily sd 
+                    ON d.ticker = sd.ticker 
+                    AND toDate(sd.timestamp) = toDate(subtractDays(d.current_date, 1))
+                
+                UNION ALL
+                
+                SELECT
+                    pc.ticker,
+                    pc.timestamp,
+                    pc.current_date,
+                    sd.close as found_close,
+                    pc.depth + 1 as depth
+                FROM previous_closes pc
+                LEFT JOIN {db.database}.stock_daily sd 
+                    ON pc.ticker = sd.ticker 
+                    AND toDate(sd.timestamp) = toDate(subtractDays(pc.current_date, pc.depth + 1))
+                WHERE pc.found_close IS NULL 
+                    AND pc.depth < 5  -- Look back up to 5 days
+            )
+            -- Get the first non-null close price found for each timestamp
+            SELECT 
+                ticker,
+                timestamp,
+                argMinIf(found_close, depth, found_close IS NOT NULL) as previous_close
+            FROM previous_closes
+            GROUP BY ticker, timestamp
         )
         
         SELECT
@@ -231,7 +280,8 @@ async def populate_master_table(db: ClickHouseDB) -> None:
             n.latest_news_title,
             n.latest_news_url,
             tr.daily_high,
-            tr.daily_low
+            tr.daily_low,
+            pc.previous_close
         FROM {db.database}.stock_bars b
         LEFT JOIN price_metrics p ON b.ticker = p.ticker AND b.timestamp = p.timestamp
         LEFT JOIN minute_quotes q ON b.ticker = q.ticker AND b.timestamp = q.timestamp
@@ -239,6 +289,7 @@ async def populate_master_table(db: ClickHouseDB) -> None:
         LEFT JOIN pivoted_indicators i ON b.ticker = i.ticker AND b.timestamp = i.timestamp
         LEFT JOIN latest_news n ON b.ticker = n.ticker AND b.timestamp = n.timestamp
         LEFT JOIN tr_metrics tr ON b.ticker = tr.ticker AND b.timestamp = tr.timestamp
+        LEFT JOIN previous_close_metrics pc ON b.ticker = pc.ticker AND b.timestamp = pc.timestamp
         """
         
         db.client.command(query)
@@ -368,6 +419,54 @@ async def create_master_table(db: ClickHouseDB) -> None:
                 max(high) OVER (PARTITION BY ticker, toDate(timestamp)) as daily_high,
                 min(low) OVER (PARTITION BY ticker, toDate(timestamp)) as daily_low
             FROM {db.database}.stock_bars
+        ),
+
+        -- Get previous day's closing price from daily bars
+        previous_close_metrics AS (
+            WITH RECURSIVE 
+            -- First get all possible dates we need to look up
+            dates AS (
+                SELECT DISTINCT
+                    ticker,
+                    timestamp,
+                    toDate(timestamp) as current_date
+                FROM {db.database}.stock_bars
+            ),
+            -- Recursively look back through dates until we find a close price
+            previous_closes AS (
+                SELECT
+                    d.ticker,
+                    d.timestamp,
+                    d.current_date,
+                    sd.close as found_close,
+                    1 as depth
+                FROM dates d
+                LEFT JOIN {db.database}.stock_daily sd 
+                    ON d.ticker = sd.ticker 
+                    AND toDate(sd.timestamp) = toDate(subtractDays(d.current_date, 1))
+                
+                UNION ALL
+                
+                SELECT
+                    pc.ticker,
+                    pc.timestamp,
+                    pc.current_date,
+                    sd.close as found_close,
+                    pc.depth + 1 as depth
+                FROM previous_closes pc
+                LEFT JOIN {db.database}.stock_daily sd 
+                    ON pc.ticker = sd.ticker 
+                    AND toDate(sd.timestamp) = toDate(subtractDays(pc.current_date, pc.depth + 1))
+                WHERE pc.found_close IS NULL 
+                    AND pc.depth < 5  -- Look back up to 5 days
+            )
+            -- Get the first non-null close price found for each timestamp
+            SELECT 
+                ticker,
+                timestamp,
+                argMinIf(found_close, depth, found_close IS NOT NULL) as previous_close
+            FROM previous_closes
+            GROUP BY ticker, timestamp
         )
         
         SELECT
@@ -418,7 +517,8 @@ async def create_master_table(db: ClickHouseDB) -> None:
             n.latest_news_title,
             n.latest_news_url,
             tr.daily_high,
-            tr.daily_low
+            tr.daily_low,
+            pc.previous_close
         FROM {db.database}.stock_bars b
         LEFT JOIN price_metrics p ON b.ticker = p.ticker AND b.timestamp = p.timestamp
         LEFT JOIN minute_quotes q ON b.ticker = q.ticker AND b.timestamp = q.timestamp
@@ -426,6 +526,7 @@ async def create_master_table(db: ClickHouseDB) -> None:
         LEFT JOIN pivoted_indicators i ON b.ticker = i.ticker AND b.timestamp = i.timestamp
         LEFT JOIN latest_news n ON b.ticker = n.ticker AND b.timestamp = n.timestamp
         LEFT JOIN tr_metrics tr ON b.ticker = tr.ticker AND b.timestamp = tr.timestamp
+        LEFT JOIN previous_close_metrics pc ON b.ticker = pc.ticker AND b.timestamp = pc.timestamp
         """
         
         db.client.command(view_query)
