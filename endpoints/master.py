@@ -67,14 +67,9 @@ MASTER_SCHEMA = {
     "latest_news_title": "Nullable(String)",
     "latest_news_url": "Nullable(String)",
     
-    # True Range and ATR metrics
+    # Daily high/low metrics
     "daily_high": "Nullable(Float64)",
-    "daily_low": "Nullable(Float64)",
-    "tr_current": "Nullable(Float64)",
-    "tr_high_close": "Nullable(Float64)",
-    "tr_low_close": "Nullable(Float64)",
-    "tr_value": "Nullable(Float64)",
-    "atr_value": "Nullable(Float64)"
+    "daily_low": "Nullable(Float64)"
 }
 
 async def populate_master_table(db: ClickHouseDB) -> None:
@@ -129,20 +124,20 @@ async def populate_master_table(db: ClickHouseDB) -> None:
             SELECT
                 ticker,
                 timestamp,
-                argMax(IF(indicator_type = 'SMA_5', value, NULL), timestamp) AS sma_5,
-                argMax(IF(indicator_type = 'SMA_9', value, NULL), timestamp) AS sma_9,
-                argMax(IF(indicator_type = 'SMA_12', value, NULL), timestamp) AS sma_12,
-                argMax(IF(indicator_type = 'SMA_20', value, NULL), timestamp) AS sma_20,
-                argMax(IF(indicator_type = 'SMA_50', value, NULL), timestamp) AS sma_50,
-                argMax(IF(indicator_type = 'SMA_100', value, NULL), timestamp) AS sma_100,
-                argMax(IF(indicator_type = 'SMA_200', value, NULL), timestamp) AS sma_200,
-                argMax(IF(indicator_type = 'EMA_9', value, NULL), timestamp) AS ema_9,
-                argMax(IF(indicator_type = 'EMA_12', value, NULL), timestamp) AS ema_12,
-                argMax(IF(indicator_type = 'EMA_20', value, NULL), timestamp) AS ema_20,
-                argMax(IF(indicator_type = 'MACD', value, NULL), timestamp) AS macd_value,
-                argMax(IF(indicator_type = 'MACD', signal, NULL), timestamp) AS macd_signal,
-                argMax(IF(indicator_type = 'MACD', histogram, NULL), timestamp) AS macd_histogram,
-                argMax(IF(indicator_type = 'RSI', value, NULL), timestamp) AS rsi_14
+                any(if(indicator_type = 'SMA_5', value, NULL)) AS sma_5,
+                any(if(indicator_type = 'SMA_9', value, NULL)) AS sma_9,
+                any(if(indicator_type = 'SMA_12', value, NULL)) AS sma_12,
+                any(if(indicator_type = 'SMA_20', value, NULL)) AS sma_20,
+                any(if(indicator_type = 'SMA_50', value, NULL)) AS sma_50,
+                any(if(indicator_type = 'SMA_100', value, NULL)) AS sma_100,
+                any(if(indicator_type = 'SMA_200', value, NULL)) AS sma_200,
+                any(if(indicator_type = 'EMA_9', value, NULL)) AS ema_9,
+                any(if(indicator_type = 'EMA_12', value, NULL)) AS ema_12,
+                any(if(indicator_type = 'EMA_20', value, NULL)) AS ema_20,
+                any(if(indicator_type = 'MACD', value, NULL)) AS macd_value,
+                any(if(indicator_type = 'MACD', signal, NULL)) AS macd_signal,
+                any(if(indicator_type = 'MACD', histogram, NULL)) AS macd_histogram,
+                any(if(indicator_type = 'RSI', value, NULL)) AS rsi_14
             FROM {db.database}.stock_indicators
             GROUP BY ticker, timestamp
         ),
@@ -178,56 +173,14 @@ async def populate_master_table(db: ClickHouseDB) -> None:
             FROM {db.database}.stock_bars
         ),
 
-        -- Calculate daily high/low and TR metrics
+        -- Calculate daily high/low metrics only
         tr_metrics AS (
-            WITH
-            daily_closes AS (
-                SELECT
-                    sb1.ticker as ticker,
-                    sb1.timestamp as timestamp,
-                    sb1.close as close,
-                    toDate(sb1.timestamp) AS trade_date
-                FROM {db.database}.stock_bars sb1
-                WHERE formatDateTime(sb1.timestamp, '%H:%M:%S') = '21:00:00'
-            ),
-            daily_values AS (
-                SELECT
-                    sb2.ticker,
-                    sb2.timestamp,
-                    toDate(sb2.timestamp) as trade_date,
-                    max(sb2.high) OVER (PARTITION BY sb2.ticker, toDate(sb2.timestamp)) as daily_high,
-                    min(sb2.low) OVER (PARTITION BY sb2.ticker, toDate(sb2.timestamp)) as daily_low,
-                    first_value(dc.close) OVER (
-                        PARTITION BY sb2.ticker, toDate(sb2.timestamp)
-                        ORDER BY dc.timestamp DESC
-                    ) as prev_close
-                FROM {db.database}.stock_bars sb2
-                LEFT JOIN daily_closes dc ON sb2.ticker = dc.ticker 
-                    AND toDate(sb2.timestamp) = toDate(dc.timestamp) + INTERVAL 1 DAY
-            )
-            SELECT DISTINCT
-                dv.ticker,
-                dv.timestamp,
-                dv.daily_high,
-                dv.daily_low,
-                dv.daily_high - dv.daily_low AS tr_current,
-                dv.daily_high - dv.prev_close AS tr_high_close,
-                dv.daily_low - dv.prev_close AS tr_low_close,
-                greatest(
-                    dv.daily_high - dv.daily_low,
-                    abs(dv.daily_high - dv.prev_close),
-                    abs(dv.daily_low - dv.prev_close)
-                ) AS tr_value,
-                avg(greatest(
-                    dv.daily_high - dv.daily_low,
-                    abs(dv.daily_high - dv.prev_close),
-                    abs(dv.daily_low - dv.prev_close)
-                )) OVER (
-                    PARTITION BY dv.ticker 
-                    ORDER BY dv.timestamp 
-                    ROWS BETWEEN 13 PRECEDING AND CURRENT ROW
-                ) AS atr_value
-            FROM daily_values dv
+            SELECT
+                ticker,
+                timestamp,
+                max(high) OVER (PARTITION BY ticker, toDate(timestamp)) as daily_high,
+                min(low) OVER (PARTITION BY ticker, toDate(timestamp)) as daily_low
+            FROM {db.database}.stock_bars
         )
         
         SELECT
@@ -278,12 +231,7 @@ async def populate_master_table(db: ClickHouseDB) -> None:
             n.latest_news_title,
             n.latest_news_url,
             tr.daily_high,
-            tr.daily_low,
-            tr.tr_current,
-            tr.tr_high_close,
-            tr.tr_low_close,
-            tr.tr_value,
-            tr.atr_value
+            tr.daily_low
         FROM {db.database}.stock_bars b
         LEFT JOIN price_metrics p ON b.ticker = p.ticker AND b.timestamp = p.timestamp
         LEFT JOIN minute_quotes q ON b.ticker = q.ticker AND b.timestamp = q.timestamp
@@ -363,20 +311,20 @@ async def create_master_table(db: ClickHouseDB) -> None:
             SELECT
                 ticker,
                 timestamp,
-                argMax(IF(indicator_type = 'SMA_5', value, NULL), timestamp) AS sma_5,
-                argMax(IF(indicator_type = 'SMA_9', value, NULL), timestamp) AS sma_9,
-                argMax(IF(indicator_type = 'SMA_12', value, NULL), timestamp) AS sma_12,
-                argMax(IF(indicator_type = 'SMA_20', value, NULL), timestamp) AS sma_20,
-                argMax(IF(indicator_type = 'SMA_50', value, NULL), timestamp) AS sma_50,
-                argMax(IF(indicator_type = 'SMA_100', value, NULL), timestamp) AS sma_100,
-                argMax(IF(indicator_type = 'SMA_200', value, NULL), timestamp) AS sma_200,
-                argMax(IF(indicator_type = 'EMA_9', value, NULL), timestamp) AS ema_9,
-                argMax(IF(indicator_type = 'EMA_12', value, NULL), timestamp) AS ema_12,
-                argMax(IF(indicator_type = 'EMA_20', value, NULL), timestamp) AS ema_20,
-                argMax(IF(indicator_type = 'MACD', value, NULL), timestamp) AS macd_value,
-                argMax(IF(indicator_type = 'MACD', signal, NULL), timestamp) AS macd_signal,
-                argMax(IF(indicator_type = 'MACD', histogram, NULL), timestamp) AS macd_histogram,
-                argMax(IF(indicator_type = 'RSI', value, NULL), timestamp) AS rsi_14
+                any(if(indicator_type = 'SMA_5', value, NULL)) AS sma_5,
+                any(if(indicator_type = 'SMA_9', value, NULL)) AS sma_9,
+                any(if(indicator_type = 'SMA_12', value, NULL)) AS sma_12,
+                any(if(indicator_type = 'SMA_20', value, NULL)) AS sma_20,
+                any(if(indicator_type = 'SMA_50', value, NULL)) AS sma_50,
+                any(if(indicator_type = 'SMA_100', value, NULL)) AS sma_100,
+                any(if(indicator_type = 'SMA_200', value, NULL)) AS sma_200,
+                any(if(indicator_type = 'EMA_9', value, NULL)) AS ema_9,
+                any(if(indicator_type = 'EMA_12', value, NULL)) AS ema_12,
+                any(if(indicator_type = 'EMA_20', value, NULL)) AS ema_20,
+                any(if(indicator_type = 'MACD', value, NULL)) AS macd_value,
+                any(if(indicator_type = 'MACD', signal, NULL)) AS macd_signal,
+                any(if(indicator_type = 'MACD', histogram, NULL)) AS macd_histogram,
+                any(if(indicator_type = 'RSI', value, NULL)) AS rsi_14
             FROM {db.database}.stock_indicators
             GROUP BY ticker, timestamp
         ),
@@ -412,56 +360,14 @@ async def create_master_table(db: ClickHouseDB) -> None:
             FROM {db.database}.stock_bars
         ),
 
-        -- Calculate daily high/low and TR metrics
+        -- Calculate daily high/low metrics only
         tr_metrics AS (
-            WITH
-            daily_closes AS (
-                SELECT
-                    sb1.ticker as ticker,
-                    sb1.timestamp as timestamp,
-                    sb1.close as close,
-                    toDate(sb1.timestamp) AS trade_date
-                FROM {db.database}.stock_bars sb1
-                WHERE formatDateTime(sb1.timestamp, '%H:%M:%S') = '21:00:00'
-            ),
-            daily_values AS (
-                SELECT
-                    sb2.ticker,
-                    sb2.timestamp,
-                    toDate(sb2.timestamp) as trade_date,
-                    max(sb2.high) OVER (PARTITION BY sb2.ticker, toDate(sb2.timestamp)) as daily_high,
-                    min(sb2.low) OVER (PARTITION BY sb2.ticker, toDate(sb2.timestamp)) as daily_low,
-                    first_value(dc.close) OVER (
-                        PARTITION BY sb2.ticker, toDate(sb2.timestamp)
-                        ORDER BY dc.timestamp DESC
-                    ) as prev_close
-                FROM {db.database}.stock_bars sb2
-                LEFT JOIN daily_closes dc ON sb2.ticker = dc.ticker 
-                    AND toDate(sb2.timestamp) = toDate(dc.timestamp) + INTERVAL 1 DAY
-            )
-            SELECT DISTINCT
-                dv.ticker,
-                dv.timestamp,
-                dv.daily_high,
-                dv.daily_low,
-                dv.daily_high - dv.daily_low AS tr_current,
-                dv.daily_high - dv.prev_close AS tr_high_close,
-                dv.daily_low - dv.prev_close AS tr_low_close,
-                greatest(
-                    dv.daily_high - dv.daily_low,
-                    abs(dv.daily_high - dv.prev_close),
-                    abs(dv.daily_low - dv.prev_close)
-                ) AS tr_value,
-                avg(greatest(
-                    dv.daily_high - dv.daily_low,
-                    abs(dv.daily_high - dv.prev_close),
-                    abs(dv.daily_low - dv.prev_close)
-                )) OVER (
-                    PARTITION BY dv.ticker 
-                    ORDER BY dv.timestamp 
-                    ROWS BETWEEN 13 PRECEDING AND CURRENT ROW
-                ) AS atr_value
-            FROM daily_values dv
+            SELECT
+                ticker,
+                timestamp,
+                max(high) OVER (PARTITION BY ticker, toDate(timestamp)) as daily_high,
+                min(low) OVER (PARTITION BY ticker, toDate(timestamp)) as daily_low
+            FROM {db.database}.stock_bars
         )
         
         SELECT
@@ -512,12 +418,7 @@ async def create_master_table(db: ClickHouseDB) -> None:
             n.latest_news_title,
             n.latest_news_url,
             tr.daily_high,
-            tr.daily_low,
-            tr.tr_current,
-            tr.tr_high_close,
-            tr.tr_low_close,
-            tr.tr_value,
-            tr.atr_value
+            tr.daily_low
         FROM {db.database}.stock_bars b
         LEFT JOIN price_metrics p ON b.ticker = p.ticker AND b.timestamp = p.timestamp
         LEFT JOIN minute_quotes q ON b.ticker = q.ticker AND b.timestamp = q.timestamp
