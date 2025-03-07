@@ -349,7 +349,7 @@ async def create_master_table(db: ClickHouseDB) -> None:
         CREATE TABLE IF NOT EXISTS {db.database}.{config.TABLE_STOCK_MASTER} (
             {columns_def}
         ) ENGINE = MergeTree()
-        ORDER BY (ticker, timestamp)
+        ORDER BY (timestamp, ticker)
         """
         db.client.command(create_table_query)
         print("Created master table successfully")
