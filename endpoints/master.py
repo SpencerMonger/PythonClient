@@ -70,7 +70,14 @@ MASTER_SCHEMA = {
     # Daily high/low metrics
     "daily_high": "Nullable(Float64)",
     "daily_low": "Nullable(Float64)",
-    "previous_close": "Nullable(Float64)"  # Previous day's closing price
+    "previous_close": "Nullable(Float64)",  # Previous day's closing price
+    
+    # True Range and ATR metrics
+    "tr_current": "Nullable(Float64)",      # Current day's high-low range
+    "tr_high_close": "Nullable(Float64)",   # High minus previous close
+    "tr_low_close": "Nullable(Float64)",    # Low minus previous close
+    "tr_value": "Nullable(Float64)",        # Maximum of the three TR values
+    "atr_value": "Nullable(Float64)"        # 14-day average of TR values
 }
 
 async def populate_master_table(db: ClickHouseDB) -> None:
@@ -180,7 +187,9 @@ async def populate_master_table(db: ClickHouseDB) -> None:
                 ticker,
                 timestamp,
                 max(high) OVER (PARTITION BY ticker, toDate(timestamp)) as daily_high,
-                min(low) OVER (PARTITION BY ticker, toDate(timestamp)) as daily_low
+                min(low) OVER (PARTITION BY ticker, toDate(timestamp)) as daily_low,
+                -- Calculate TR components
+                max(high) OVER (PARTITION BY ticker, toDate(timestamp)) - min(low) OVER (PARTITION BY ticker, toDate(timestamp)) as tr_current
             FROM {db.database}.stock_bars
         ),
 
@@ -230,6 +239,30 @@ async def populate_master_table(db: ClickHouseDB) -> None:
                 argMinIf(found_close, depth, found_close IS NOT NULL) as previous_close
             FROM previous_closes
             GROUP BY ticker, timestamp
+        ),
+
+        -- Calculate TR and ATR metrics
+        tr_atr_metrics AS (
+            SELECT
+                ticker,
+                timestamp,
+                tr_current,
+                daily_high - previous_close as tr_high_close,
+                daily_low - previous_close as tr_low_close,
+                greatest(tr_current, abs(daily_high - previous_close), abs(daily_low - previous_close)) as tr_value,
+                avg(greatest(tr_current, abs(daily_high - previous_close), abs(daily_low - previous_close))) 
+                    OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 13 PRECEDING AND CURRENT ROW) as atr_value
+            FROM (
+                SELECT 
+                    t.ticker,
+                    t.timestamp,
+                    t.daily_high,
+                    t.daily_low,
+                    t.tr_current,
+                    pc.previous_close
+                FROM tr_metrics t
+                LEFT JOIN previous_close_metrics pc ON t.ticker = pc.ticker AND t.timestamp = pc.timestamp
+            )
         )
         
         SELECT
@@ -281,7 +314,12 @@ async def populate_master_table(db: ClickHouseDB) -> None:
             n.latest_news_url,
             tr.daily_high,
             tr.daily_low,
-            pc.previous_close
+            pc.previous_close,
+            tra.tr_current,
+            tra.tr_high_close,
+            tra.tr_low_close,
+            tra.tr_value,
+            tra.atr_value
         FROM {db.database}.stock_bars b
         LEFT JOIN price_metrics p ON b.ticker = p.ticker AND b.timestamp = p.timestamp
         LEFT JOIN minute_quotes q ON b.ticker = q.ticker AND b.timestamp = q.timestamp
@@ -290,6 +328,7 @@ async def populate_master_table(db: ClickHouseDB) -> None:
         LEFT JOIN latest_news n ON b.ticker = n.ticker AND b.timestamp = n.timestamp
         LEFT JOIN tr_metrics tr ON b.ticker = tr.ticker AND b.timestamp = tr.timestamp
         LEFT JOIN previous_close_metrics pc ON b.ticker = pc.ticker AND b.timestamp = pc.timestamp
+        LEFT JOIN tr_atr_metrics tra ON b.ticker = tra.ticker AND b.timestamp = tra.timestamp
         """
         
         db.client.command(query)
@@ -417,7 +456,9 @@ async def create_master_table(db: ClickHouseDB) -> None:
                 ticker,
                 timestamp,
                 max(high) OVER (PARTITION BY ticker, toDate(timestamp)) as daily_high,
-                min(low) OVER (PARTITION BY ticker, toDate(timestamp)) as daily_low
+                min(low) OVER (PARTITION BY ticker, toDate(timestamp)) as daily_low,
+                -- Calculate TR components
+                max(high) OVER (PARTITION BY ticker, toDate(timestamp)) - min(low) OVER (PARTITION BY ticker, toDate(timestamp)) as tr_current
             FROM {db.database}.stock_bars
         ),
 
@@ -467,6 +508,30 @@ async def create_master_table(db: ClickHouseDB) -> None:
                 argMinIf(found_close, depth, found_close IS NOT NULL) as previous_close
             FROM previous_closes
             GROUP BY ticker, timestamp
+        ),
+
+        -- Calculate TR and ATR metrics
+        tr_atr_metrics AS (
+            SELECT
+                ticker,
+                timestamp,
+                tr_current,
+                daily_high - previous_close as tr_high_close,
+                daily_low - previous_close as tr_low_close,
+                greatest(tr_current, abs(daily_high - previous_close), abs(daily_low - previous_close)) as tr_value,
+                avg(greatest(tr_current, abs(daily_high - previous_close), abs(daily_low - previous_close))) 
+                    OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 13 PRECEDING AND CURRENT ROW) as atr_value
+            FROM (
+                SELECT 
+                    t.ticker,
+                    t.timestamp,
+                    t.daily_high,
+                    t.daily_low,
+                    t.tr_current,
+                    pc.previous_close
+                FROM tr_metrics t
+                LEFT JOIN previous_close_metrics pc ON t.ticker = pc.ticker AND t.timestamp = pc.timestamp
+            )
         )
         
         SELECT
@@ -518,7 +583,12 @@ async def create_master_table(db: ClickHouseDB) -> None:
             n.latest_news_url,
             tr.daily_high,
             tr.daily_low,
-            pc.previous_close
+            pc.previous_close,
+            tra.tr_current,
+            tra.tr_high_close,
+            tra.tr_low_close,
+            tra.tr_value,
+            tra.atr_value
         FROM {db.database}.stock_bars b
         LEFT JOIN price_metrics p ON b.ticker = p.ticker AND b.timestamp = p.timestamp
         LEFT JOIN minute_quotes q ON b.ticker = q.ticker AND b.timestamp = q.timestamp
@@ -527,6 +597,7 @@ async def create_master_table(db: ClickHouseDB) -> None:
         LEFT JOIN latest_news n ON b.ticker = n.ticker AND b.timestamp = n.timestamp
         LEFT JOIN tr_metrics tr ON b.ticker = tr.ticker AND b.timestamp = tr.timestamp
         LEFT JOIN previous_close_metrics pc ON b.ticker = pc.ticker AND b.timestamp = pc.timestamp
+        LEFT JOIN tr_atr_metrics tra ON b.ticker = tra.ticker AND b.timestamp = tra.timestamp
         """
         
         db.client.command(view_query)
