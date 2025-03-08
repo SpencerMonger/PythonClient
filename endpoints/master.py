@@ -62,11 +62,6 @@ MASTER_SCHEMA = {
     "macd_histogram": "Nullable(Float64)",
     "rsi_14": "Nullable(Float64)",
     
-    # Fields from stock_news (latest news in the minute)
-    "latest_news_id": "Nullable(String)",
-    "latest_news_title": "Nullable(String)",
-    "latest_news_url": "Nullable(String)",
-    
     # Daily high/low metrics
     "daily_high": "Nullable(Float64)",
     "daily_low": "Nullable(Float64)",
@@ -150,19 +145,6 @@ async def populate_master_table(db: ClickHouseDB) -> None:
             GROUP BY ticker, timestamp
         ),
         
-        -- Get latest news per minute
-        latest_news AS (
-            SELECT
-                ticker,
-                toStartOfMinute(published_utc) AS timestamp,
-                argMax(id, published_utc) AS latest_news_id,
-                argMax(title, published_utc) AS latest_news_title,
-                argMax(article_url, published_utc) AS latest_news_url
-            FROM {db.database}.stock_news
-            ARRAY JOIN tickers AS ticker
-            GROUP BY ticker, timestamp
-        ),
-
         -- Calculate price differences and targets
         price_metrics AS (
             SELECT 
@@ -309,9 +291,6 @@ async def populate_master_table(db: ClickHouseDB) -> None:
             i.macd_signal,
             i.macd_histogram,
             i.rsi_14,
-            n.latest_news_id,
-            n.latest_news_title,
-            n.latest_news_url,
             tr.daily_high,
             tr.daily_low,
             pc.previous_close,
@@ -325,7 +304,6 @@ async def populate_master_table(db: ClickHouseDB) -> None:
         LEFT JOIN minute_quotes q ON b.ticker = q.ticker AND b.timestamp = q.timestamp
         LEFT JOIN minute_trades t ON b.ticker = t.ticker AND b.timestamp = t.timestamp
         LEFT JOIN pivoted_indicators i ON b.ticker = i.ticker AND b.timestamp = i.timestamp
-        LEFT JOIN latest_news n ON b.ticker = n.ticker AND b.timestamp = n.timestamp
         LEFT JOIN tr_metrics tr ON b.ticker = tr.ticker AND b.timestamp = tr.timestamp
         LEFT JOIN previous_close_metrics pc ON b.ticker = pc.ticker AND b.timestamp = pc.timestamp
         LEFT JOIN tr_atr_metrics tra ON b.ticker = tra.ticker AND b.timestamp = tra.timestamp
@@ -419,19 +397,6 @@ async def create_master_table(db: ClickHouseDB) -> None:
             GROUP BY ticker, timestamp
         ),
         
-        -- Get latest news per minute
-        latest_news AS (
-            SELECT
-                ticker,
-                toStartOfMinute(published_utc) AS timestamp,
-                argMax(id, published_utc) AS latest_news_id,
-                argMax(title, published_utc) AS latest_news_title,
-                argMax(article_url, published_utc) AS latest_news_url
-            FROM {db.database}.stock_news
-            ARRAY JOIN tickers AS ticker
-            GROUP BY ticker, timestamp
-        ),
-
         -- Calculate price differences and targets
         price_metrics AS (
             SELECT 
@@ -578,9 +543,6 @@ async def create_master_table(db: ClickHouseDB) -> None:
             i.macd_signal,
             i.macd_histogram,
             i.rsi_14,
-            n.latest_news_id,
-            n.latest_news_title,
-            n.latest_news_url,
             tr.daily_high,
             tr.daily_low,
             pc.previous_close,
@@ -594,7 +556,6 @@ async def create_master_table(db: ClickHouseDB) -> None:
         LEFT JOIN minute_quotes q ON b.ticker = q.ticker AND b.timestamp = q.timestamp
         LEFT JOIN minute_trades t ON b.ticker = t.ticker AND b.timestamp = t.timestamp
         LEFT JOIN pivoted_indicators i ON b.ticker = i.ticker AND b.timestamp = i.timestamp
-        LEFT JOIN latest_news n ON b.ticker = n.ticker AND b.timestamp = n.timestamp
         LEFT JOIN tr_metrics tr ON b.ticker = tr.ticker AND b.timestamp = tr.timestamp
         LEFT JOIN previous_close_metrics pc ON b.ticker = pc.ticker AND b.timestamp = pc.timestamp
         LEFT JOIN tr_atr_metrics tra ON b.ticker = tra.ticker AND b.timestamp = tra.timestamp
