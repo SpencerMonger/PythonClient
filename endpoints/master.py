@@ -33,10 +33,9 @@ MASTER_SCHEMA = {
     "total_bid_size": "Nullable(Float64)",
     "total_ask_size": "Nullable(Float64)",
     "quote_count": "Nullable(Int32)",
-    "quote_conditions": "Array(Int32)",
+    "quote_conditions": "String",
     "ask_exchange": "Nullable(Int32)",
     "bid_exchange": "Nullable(Int32)",
-    "quote_indicators": "Array(Int32)",
     
     # Aggregated fields from stock_trades (per minute)
     "avg_trade_price": "Nullable(Float64)",
@@ -44,7 +43,7 @@ MASTER_SCHEMA = {
     "max_trade_price": "Nullable(Float64)",
     "total_trade_size": "Nullable(Int32)",
     "trade_count": "Nullable(Int32)",
-    "trade_conditions": "Array(Int32)",
+    "trade_conditions": "String",
     "trade_exchange": "Nullable(Int32)",
     
     # Fields from stock_indicators
@@ -110,27 +109,27 @@ async def populate_master_table(db: ClickHouseDB) -> None:
                 SELECT 
                     ticker,
                     timestamp,
-                    open,
-                    high,
-                    low,
-                    close,
-                    volume,
-                    vwap,
-                    transactions,
+                    round(open, 2) as open,
+                    round(high, 2) as high,
+                    round(low, 2) as low,
+                    round(close, 2) as close,
+                    coalesce(nullIf(volume, 0), 2) as volume,
+                    round(coalesce(nullIf(vwap, 0), 2), 2) as vwap,
+                    coalesce(nullIf(transactions, 0), 2) as transactions,
                     -- Calculate future close prices for price_diff
                     any(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 15 FOLLOWING AND 15 FOLLOWING) as future_close,
                     -- Calculate max_price_diff by finding largest movement up or down in next 15 minutes
-                    if(
+                    round(if(
                         abs(((max(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100) >
                         abs(((min(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100),
                         ((max(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100,
                         ((min(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100
-                    ) as max_price_diff,
+                    ), 2) as max_price_diff,
                     -- Calculate daily metrics
-                    max(high) OVER (PARTITION BY ticker, toDate(timestamp)) as daily_high,
-                    min(low) OVER (PARTITION BY ticker, toDate(timestamp)) as daily_low,
+                    round(max(high) OVER (PARTITION BY ticker, toDate(timestamp)), 2) as daily_high,
+                    round(min(low) OVER (PARTITION BY ticker, toDate(timestamp)), 2) as daily_low,
                     -- Get previous day's close using lagInFrame
-                    lagInFrame(close) OVER (PARTITION BY ticker ORDER BY toDate(timestamp)) as previous_close
+                    round(lagInFrame(close) OVER (PARTITION BY ticker ORDER BY toDate(timestamp)), 2) as previous_close
                 FROM {db.database}.stock_bars
                 WHERE toDate(timestamp) = '{current_date}'
             ),
@@ -139,17 +138,16 @@ async def populate_master_table(db: ClickHouseDB) -> None:
                 SELECT
                     ticker,
                     toStartOfMinute(sip_timestamp) as timestamp,
-                    avg(bid_price) as avg_bid_price,
-                    avg(ask_price) as avg_ask_price,
-                    min(bid_price) as min_bid_price,
-                    max(ask_price) as max_ask_price,
-                    sum(bid_size) as total_bid_size,
-                    sum(ask_size) as total_ask_size,
-                    count(*) as quote_count,
-                    arrayFlatten([coalesce(groupArray(conditions), [])]) as quote_conditions,
-                    argMax(ask_exchange, sip_timestamp) as ask_exchange,
-                    argMax(bid_exchange, sip_timestamp) as bid_exchange,
-                    arrayFlatten([coalesce(groupArray(indicators), [])]) as quote_indicators
+                    round(coalesce(nullIf(avg(bid_price), 0), 2), 2) as avg_bid_price,
+                    round(coalesce(nullIf(avg(ask_price), 0), 2), 2) as avg_ask_price,
+                    round(coalesce(nullIf(min(bid_price), 0), 2), 2) as min_bid_price,
+                    round(coalesce(nullIf(max(ask_price), 0), 2), 2) as max_ask_price,
+                    coalesce(nullIf(sum(bid_size), 0), 2) as total_bid_size,
+                    coalesce(nullIf(sum(ask_size), 0), 2) as total_ask_size,
+                    coalesce(nullIf(count(*), 0), 2) as quote_count,
+                    coalesce(nullIf(arrayStringConcat(arrayMap(x -> toString(x), arrayFlatten([coalesce(groupArray(conditions), [])]))), ''), '2') AS quote_conditions,
+                    coalesce(nullIf(argMax(ask_exchange, sip_timestamp), 0), 2) as ask_exchange,
+                    coalesce(nullIf(argMax(bid_exchange, sip_timestamp), 0), 2) as bid_exchange
                 FROM {db.database}.stock_quotes
                 WHERE toDate(sip_timestamp) = '{current_date}'
                 GROUP BY ticker, timestamp
@@ -159,13 +157,13 @@ async def populate_master_table(db: ClickHouseDB) -> None:
                 SELECT
                     ticker,
                     toStartOfMinute(sip_timestamp) as timestamp,
-                    avg(price) as avg_trade_price,
-                    min(price) as min_trade_price,
-                    max(price) as max_trade_price,
-                    sum(size) as total_trade_size,
-                    count(*) as trade_count,
-                    arrayFlatten([coalesce(groupArray(conditions), [])]) as trade_conditions,
-                    argMax(exchange, sip_timestamp) as trade_exchange
+                    round(coalesce(nullIf(avg(price), 0), 2), 2) as avg_trade_price,
+                    round(coalesce(nullIf(min(price), 0), 2), 2) as min_trade_price,
+                    round(coalesce(nullIf(max(price), 0), 2), 2) as max_trade_price,
+                    coalesce(nullIf(sum(size), 0), 2) as total_trade_size,
+                    coalesce(nullIf(count(*), 0), 2) as trade_count,
+                    coalesce(nullIf(arrayStringConcat(arrayMap(x -> toString(x), arrayFlatten([coalesce(groupArray(conditions), [])]))), ''), '2') AS trade_conditions,
+                    coalesce(nullIf(argMax(exchange, sip_timestamp), 0), 2) as trade_exchange
                 FROM {db.database}.stock_trades
                 WHERE toDate(sip_timestamp) = '{current_date}'
                 GROUP BY ticker, timestamp
@@ -175,20 +173,20 @@ async def populate_master_table(db: ClickHouseDB) -> None:
                 SELECT
                     ticker,
                     timestamp,
-                    any(if(indicator_type = 'SMA_5', value, NULL)) as sma_5,
-                    any(if(indicator_type = 'SMA_9', value, NULL)) as sma_9,
-                    any(if(indicator_type = 'SMA_12', value, NULL)) as sma_12,
-                    any(if(indicator_type = 'SMA_20', value, NULL)) as sma_20,
-                    any(if(indicator_type = 'SMA_50', value, NULL)) as sma_50,
-                    any(if(indicator_type = 'SMA_100', value, NULL)) as sma_100,
-                    any(if(indicator_type = 'SMA_200', value, NULL)) as sma_200,
-                    any(if(indicator_type = 'EMA_9', value, NULL)) as ema_9,
-                    any(if(indicator_type = 'EMA_12', value, NULL)) as ema_12,
-                    any(if(indicator_type = 'EMA_20', value, NULL)) as ema_20,
-                    any(if(indicator_type = 'MACD', value, NULL)) as macd_value,
-                    any(if(indicator_type = 'MACD', signal, NULL)) as macd_signal,
-                    any(if(indicator_type = 'MACD', histogram, NULL)) as macd_histogram,
-                    any(if(indicator_type = 'RSI', value, NULL)) as rsi_14
+                    round(coalesce(nullIf(any(if(indicator_type = 'SMA_5', value, NULL)), 0), 2), 2) as sma_5,
+                    round(coalesce(nullIf(any(if(indicator_type = 'SMA_9', value, NULL)), 0), 2), 2) as sma_9,
+                    round(coalesce(nullIf(any(if(indicator_type = 'SMA_12', value, NULL)), 0), 2), 2) as sma_12,
+                    round(coalesce(nullIf(any(if(indicator_type = 'SMA_20', value, NULL)), 0), 2), 2) as sma_20,
+                    round(coalesce(nullIf(any(if(indicator_type = 'SMA_50', value, NULL)), 0), 2), 2) as sma_50,
+                    round(coalesce(nullIf(any(if(indicator_type = 'SMA_100', value, NULL)), 0), 2), 2) as sma_100,
+                    round(coalesce(nullIf(any(if(indicator_type = 'SMA_200', value, NULL)), 0), 2), 2) as sma_200,
+                    round(coalesce(nullIf(any(if(indicator_type = 'EMA_9', value, NULL)), 0), 2), 2) as ema_9,
+                    round(coalesce(nullIf(any(if(indicator_type = 'EMA_12', value, NULL)), 0), 2), 2) as ema_12,
+                    round(coalesce(nullIf(any(if(indicator_type = 'EMA_20', value, NULL)), 0), 2), 2) as ema_20,
+                    round(coalesce(nullIf(any(if(indicator_type = 'MACD', value, NULL)), 0), 2), 2) as macd_value,
+                    round(coalesce(nullIf(any(if(indicator_type = 'MACD', signal, NULL)), 0), 2), 2) as macd_signal,
+                    round(coalesce(nullIf(any(if(indicator_type = 'MACD', histogram, NULL)), 0), 2), 2) as macd_histogram,
+                    round(coalesce(nullIf(any(if(indicator_type = 'RSI', value, NULL)), 0), 2), 2) as rsi_14
                 FROM {db.database}.stock_indicators
                 WHERE toDate(timestamp) = '{current_date}'
                 GROUP BY ticker, timestamp
@@ -226,7 +224,6 @@ async def populate_master_table(db: ClickHouseDB) -> None:
                 q.quote_conditions,
                 q.ask_exchange,
                 q.bid_exchange,
-                q.quote_indicators,
                 -- Trade metrics
                 t.avg_trade_price,
                 t.min_trade_price,
@@ -318,7 +315,7 @@ async def create_master_table(db: ClickHouseDB) -> None:
                 sum(bid_size) AS total_bid_size,
                 sum(ask_size) AS total_ask_size,
                 count(*) AS quote_count,
-                arrayFlatten([coalesce(groupArray(conditions), [])]) AS quote_conditions,
+                arrayStringConcat(arrayMap(x -> toString(x), arrayFlatten([coalesce(groupArray(conditions), [])]))) AS quote_conditions,
                 argMax(ask_exchange, sip_timestamp) AS ask_exchange,
                 argMax(bid_exchange, sip_timestamp) AS bid_exchange,
                 arrayFlatten([coalesce(groupArray(indicators), [])]) AS quote_indicators
@@ -336,7 +333,7 @@ async def create_master_table(db: ClickHouseDB) -> None:
                 max(price) AS max_trade_price,
                 sum(size) AS total_trade_size,
                 count(*) AS trade_count,
-                arrayFlatten([coalesce(groupArray(conditions), [])]) AS trade_conditions,
+                arrayStringConcat(arrayMap(x -> toString(x), arrayFlatten([coalesce(groupArray(conditions), [])]))) AS trade_conditions,
                 argMax(exchange, sip_timestamp) AS trade_exchange
             FROM {db.database}.stock_trades
             GROUP BY ticker, timestamp
@@ -408,7 +405,7 @@ async def create_master_table(db: ClickHouseDB) -> None:
                 max(high) OVER (PARTITION BY ticker, toDate(timestamp)) as daily_high,
                 min(low) OVER (PARTITION BY ticker, toDate(timestamp)) as daily_low,
                 -- Calculate TR components
-                max(high) OVER (PARTITION BY ticker, toDate(timestamp)) - min(low) OVER (PARTITION BY ticker, toDate(timestamp)) as tr_current
+                round(max(high) OVER (PARTITION BY ticker, toDate(timestamp)) - min(low) OVER (PARTITION BY ticker, toDate(timestamp)), 2) as tr_current
             FROM {db.database}.stock_bars
         ),
 
@@ -455,7 +452,7 @@ async def create_master_table(db: ClickHouseDB) -> None:
             SELECT 
                 ticker,
                 timestamp,
-                argMinIf(found_close, depth, found_close IS NOT NULL) as previous_close
+                round(argMinIf(found_close, depth, found_close IS NOT NULL), 2) as previous_close
             FROM previous_closes
             GROUP BY ticker, timestamp
         ),
@@ -466,11 +463,24 @@ async def create_master_table(db: ClickHouseDB) -> None:
                 ticker,
                 timestamp,
                 tr_current,
-                daily_high - previous_close as tr_high_close,
-                daily_low - previous_close as tr_low_close,
-                greatest(tr_current, abs(daily_high - previous_close), abs(daily_low - previous_close)) as tr_value,
-                avg(greatest(tr_current, abs(daily_high - previous_close), abs(daily_low - previous_close))) 
-                    OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 13 PRECEDING AND CURRENT ROW) as atr_value
+                round(daily_high - previous_close, 2) as tr_high_close,
+                round(daily_low - previous_close, 2) as tr_low_close,
+                round(
+                    greatest(
+                        tr_current,
+                        abs(daily_high - previous_close),
+                        abs(daily_low - previous_close)
+                    ),
+                2) as tr_value,
+                round(
+                    avg(
+                        greatest(
+                            tr_current,
+                            abs(daily_high - previous_close),
+                            abs(daily_low - previous_close)
+                        )
+                    ) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 13 PRECEDING AND CURRENT ROW),
+                2) as atr_value
             FROM (
                 SELECT 
                     t.ticker,
@@ -507,7 +517,6 @@ async def create_master_table(db: ClickHouseDB) -> None:
             q.quote_conditions,
             q.ask_exchange,
             q.bid_exchange,
-            q.quote_indicators,
             t.avg_trade_price,
             t.min_trade_price,
             t.max_trade_price,
@@ -532,11 +541,11 @@ async def create_master_table(db: ClickHouseDB) -> None:
             tr.daily_high,
             tr.daily_low,
             pc.previous_close,
-            tra.tr_current,
-            tra.tr_high_close,
-            tra.tr_low_close,
-            tra.tr_value,
-            tra.atr_value
+            round(tra.tr_current, 2) as tr_current,
+            round(tra.tr_high_close, 2) as tr_high_close,
+            round(tra.tr_low_close, 2) as tr_low_close,
+            round(tra.tr_value, 2) as tr_value,
+            round(tra.atr_value, 2) as atr_value
         FROM {db.database}.stock_bars b
         LEFT JOIN price_metrics p ON b.ticker = p.ticker AND b.timestamp = p.timestamp
         LEFT JOIN minute_quotes q ON b.ticker = q.ticker AND b.timestamp = q.timestamp
