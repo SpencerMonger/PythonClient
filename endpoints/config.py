@@ -1,8 +1,31 @@
 import os
 from dotenv import load_dotenv
+from pathlib import Path
+
+# Find the .env file
+def find_dotenv():
+    # Try current directory first
+    if os.path.exists('.env'):
+        return '.env'
+    
+    # Try the directory containing this file
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    env_in_current = os.path.join(current_dir, '.env')
+    if os.path.exists(env_in_current):
+        return env_in_current
+        
+    # Try parent directory
+    parent_dir = os.path.dirname(current_dir)
+    env_in_parent = os.path.join(parent_dir, '.env')
+    if os.path.exists(env_in_parent):
+        return env_in_parent
+    
+    raise FileNotFoundError("Could not find .env file")
 
 # Load environment variables
-load_dotenv()
+env_path = find_dotenv()
+print(f"Loading environment variables from: {env_path}")
+load_dotenv(env_path)
 
 # Polygon.io settings
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
