@@ -75,6 +75,211 @@ MASTER_SCHEMA = {
     "atr_value": "Nullable(Float64)"        # 14-day average of TR values
 }
 
+# Schema for normalized stock data table
+NORMALIZED_SCHEMA = {
+    # Non-normalized fields
+    "ticker": "String",
+    "timestamp": "DateTime64(9)",
+    "target": "Nullable(Int32)",
+    "quote_conditions": "String",
+    "trade_conditions": "String",
+    "ask_exchange": "Nullable(Int32)",
+    "bid_exchange": "Nullable(Int32)",
+    "trade_exchange": "Nullable(Int32)",
+    
+    # Normalized fields (all Float64)
+    "open": "Float64",
+    "high": "Float64",
+    "low": "Float64",
+    "close": "Float64",
+    "volume": "Float64",
+    "vwap": "Float64",
+    "transactions": "Float64",
+    "price_diff": "Float64",
+    "max_price_diff": "Float64",
+    "avg_bid_price": "Float64",
+    "avg_ask_price": "Float64",
+    "min_bid_price": "Float64",
+    "max_ask_price": "Float64",
+    "total_bid_size": "Float64",
+    "total_ask_size": "Float64",
+    "quote_count": "Float64",
+    "avg_trade_price": "Float64",
+    "min_trade_price": "Float64",
+    "max_trade_price": "Float64",
+    "total_trade_size": "Float64",
+    "trade_count": "Float64",
+    "sma_5": "Float64",
+    "sma_9": "Float64",
+    "sma_12": "Float64",
+    "sma_20": "Float64",
+    "sma_50": "Float64",
+    "sma_100": "Float64",
+    "sma_200": "Float64",
+    "ema_9": "Float64",
+    "ema_12": "Float64",
+    "ema_20": "Float64",
+    "macd_value": "Float64",
+    "macd_signal": "Float64",
+    "macd_histogram": "Float64",
+    "rsi_14": "Float64",
+    "daily_high": "Float64",
+    "daily_low": "Float64",
+    "previous_close": "Float64",
+    "tr_current": "Float64",
+    "tr_high_close": "Float64",
+    "tr_low_close": "Float64",
+    "tr_value": "Float64",
+    "atr_value": "Float64"
+}
+
+async def create_normalized_table(db: ClickHouseDB) -> None:
+    """
+    Create the normalized stock data table that automatically updates from the master table
+    """
+    try:
+        # Create the normalized table
+        columns_def = ", ".join(f"{col} {type_}" for col, type_ in NORMALIZED_SCHEMA.items())
+        create_table_query = f"""
+        CREATE TABLE IF NOT EXISTS {db.database}.stock_normalized (
+            {columns_def}
+        ) ENGINE = MergeTree()
+        ORDER BY (timestamp, ticker)
+        """
+        db.client.command(create_table_query)
+        print("Created normalized table successfully")
+        
+        # Create the materialized view that will populate the normalized table
+        view_query = f"""
+        CREATE MATERIALIZED VIEW IF NOT EXISTS {db.database}.stock_normalized_mv 
+        TO {db.database}.stock_normalized
+        AS
+        SELECT
+            ticker,
+            timestamp,
+            target,
+            quote_conditions,
+            trade_conditions,
+            ask_exchange,
+            bid_exchange,
+            trade_exchange,
+            -- Apply sigmoid normalization to scale values between 0 and 5
+            -- Formula: 5 / (1 + exp(-5 * (x - min) / (max - min)))
+            -- For each field, we use a reasonable min/max range based on the data type
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(open, 0), 2) / 1000))), 2) as open,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(high, 0), 2) / 1000))), 2) as high,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(low, 0), 2) / 1000))), 2) as low,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(close, 0), 2) / 1000))), 2) as close,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(volume, 0), 2) / 1000000))), 2) as volume,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(vwap, 0), 2) / 1000))), 2) as vwap,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(transactions, 0), 2) / 1000))), 2) as transactions,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(price_diff, 0), 2) / 10))), 2) as price_diff,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(max_price_diff, 0), 2) / 10))), 2) as max_price_diff,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(avg_bid_price, 0), 2) / 1000))), 2) as avg_bid_price,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(avg_ask_price, 0), 2) / 1000))), 2) as avg_ask_price,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(min_bid_price, 0), 2) / 1000))), 2) as min_bid_price,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(max_ask_price, 0), 2) / 1000))), 2) as max_ask_price,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(total_bid_size, 0), 2) / 100000))), 2) as total_bid_size,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(total_ask_size, 0), 2) / 100000))), 2) as total_ask_size,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(quote_count, 0), 2) / 1000))), 2) as quote_count,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(avg_trade_price, 0), 2) / 1000))), 2) as avg_trade_price,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(min_trade_price, 0), 2) / 1000))), 2) as min_trade_price,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(max_trade_price, 0), 2) / 1000))), 2) as max_trade_price,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(total_trade_size, 0), 2) / 100000))), 2) as total_trade_size,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(trade_count, 0), 2) / 1000))), 2) as trade_count,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_5, 0), 2) / 1000))), 2) as sma_5,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_9, 0), 2) / 1000))), 2) as sma_9,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_12, 0), 2) / 1000))), 2) as sma_12,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_20, 0), 2) / 1000))), 2) as sma_20,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_50, 0), 2) / 1000))), 2) as sma_50,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_100, 0), 2) / 1000))), 2) as sma_100,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_200, 0), 2) / 1000))), 2) as sma_200,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(ema_9, 0), 2) / 1000))), 2) as ema_9,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(ema_12, 0), 2) / 1000))), 2) as ema_12,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(ema_20, 0), 2) / 1000))), 2) as ema_20,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(macd_value, 0), 2) / 10))), 2) as macd_value,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(macd_signal, 0), 2) / 10))), 2) as macd_signal,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(macd_histogram, 0), 2) / 10))), 2) as macd_histogram,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(rsi_14, 0), 2) / 100))), 2) as rsi_14,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(daily_high, 0), 2) / 1000))), 2) as daily_high,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(daily_low, 0), 2) / 1000))), 2) as daily_low,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(previous_close, 0), 2) / 1000))), 2) as previous_close,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_current, 0), 2) / 100))), 2) as tr_current,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_high_close, 0), 2) / 100))), 2) as tr_high_close,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_low_close, 0), 2) / 100))), 2) as tr_low_close,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_value, 0), 2) / 100))), 2) as tr_value,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(atr_value, 0), 2) / 100))), 2) as atr_value
+        FROM {db.database}.{config.TABLE_STOCK_MASTER}
+        """
+        
+        db.client.command(view_query)
+        print("Created materialized view successfully")
+        
+        # Populate the normalized table with existing data from master table
+        populate_query = f"""
+        INSERT INTO {db.database}.stock_normalized
+        SELECT
+            ticker,
+            timestamp,
+            target,
+            quote_conditions,
+            trade_conditions,
+            ask_exchange,
+            bid_exchange,
+            trade_exchange,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(open, 0), 2) / 1000))), 2) as open,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(high, 0), 2) / 1000))), 2) as high,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(low, 0), 2) / 1000))), 2) as low,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(close, 0), 2) / 1000))), 2) as close,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(volume, 0), 2) / 1000000))), 2) as volume,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(vwap, 0), 2) / 1000))), 2) as vwap,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(transactions, 0), 2) / 1000))), 2) as transactions,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(price_diff, 0), 2) / 10))), 2) as price_diff,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(max_price_diff, 0), 2) / 10))), 2) as max_price_diff,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(avg_bid_price, 0), 2) / 1000))), 2) as avg_bid_price,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(avg_ask_price, 0), 2) / 1000))), 2) as avg_ask_price,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(min_bid_price, 0), 2) / 1000))), 2) as min_bid_price,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(max_ask_price, 0), 2) / 1000))), 2) as max_ask_price,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(total_bid_size, 0), 2) / 100000))), 2) as total_bid_size,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(total_ask_size, 0), 2) / 100000))), 2) as total_ask_size,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(quote_count, 0), 2) / 1000))), 2) as quote_count,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(avg_trade_price, 0), 2) / 1000))), 2) as avg_trade_price,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(min_trade_price, 0), 2) / 1000))), 2) as min_trade_price,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(max_trade_price, 0), 2) / 1000))), 2) as max_trade_price,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(total_trade_size, 0), 2) / 100000))), 2) as total_trade_size,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(trade_count, 0), 2) / 1000))), 2) as trade_count,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_5, 0), 2) / 1000))), 2) as sma_5,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_9, 0), 2) / 1000))), 2) as sma_9,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_12, 0), 2) / 1000))), 2) as sma_12,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_20, 0), 2) / 1000))), 2) as sma_20,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_50, 0), 2) / 1000))), 2) as sma_50,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_100, 0), 2) / 1000))), 2) as sma_100,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_200, 0), 2) / 1000))), 2) as sma_200,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(ema_9, 0), 2) / 1000))), 2) as ema_9,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(ema_12, 0), 2) / 1000))), 2) as ema_12,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(ema_20, 0), 2) / 1000))), 2) as ema_20,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(macd_value, 0), 2) / 10))), 2) as macd_value,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(macd_signal, 0), 2) / 10))), 2) as macd_signal,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(macd_histogram, 0), 2) / 10))), 2) as macd_histogram,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(rsi_14, 0), 2) / 100))), 2) as rsi_14,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(daily_high, 0), 2) / 1000))), 2) as daily_high,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(daily_low, 0), 2) / 1000))), 2) as daily_low,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(previous_close, 0), 2) / 1000))), 2) as previous_close,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_current, 0), 2) / 100))), 2) as tr_current,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_high_close, 0), 2) / 100))), 2) as tr_high_close,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_low_close, 0), 2) / 100))), 2) as tr_low_close,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_value, 0), 2) / 100))), 2) as tr_value,
+            round(5 / (1 + exp(-5 * (coalesce(nullIf(atr_value, 0), 2) / 100))), 2) as atr_value
+        FROM {db.database}.{config.TABLE_STOCK_MASTER}
+        """
+        
+        db.client.command(populate_query)
+        print("Populated normalized table with existing data")
+        
+    except Exception as e:
+        print(f"Error creating normalized table: {str(e)}")
+        raise e
+
 async def populate_master_table(db: ClickHouseDB) -> None:
     """
     Populate the master table with existing data from source tables
@@ -570,4 +775,5 @@ async def init_master_table(db: ClickHouseDB) -> None:
     """
     Initialize the master stock data table
     """
-    await create_master_table(db) 
+    await create_master_table(db)
+    await create_normalized_table(db) 
