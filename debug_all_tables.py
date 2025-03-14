@@ -185,9 +185,9 @@ def analyze_all_tables():
         'stock_daily',
         'stock_trades',
         'stock_quotes',
-        'stock_news',
         'stock_indicators',
-        'stock_master'
+        'stock_master',
+        'stock_normalized'
     ]
     
     for table in tables:
@@ -197,24 +197,14 @@ def analyze_all_tables():
         
         # Get date column name
         date_col = 'sip_timestamp' if table in ['stock_trades', 'stock_quotes'] else 'timestamp'
-        if table == 'stock_news':
-            date_col = 'published_utc'
         
         # Get total rows and duplicates
-        if table == 'stock_news':
-            total_rows_query = f"""
-            SELECT 
-                count(*) as total_rows,
-                count(*) - count(DISTINCT (arrayJoin(tickers), {date_col})) as duplicate_rows
-            FROM {table}
-            """
-        else:
-            total_rows_query = f"""
-            SELECT 
-                count(*) as total_rows,
-                count(*) - count(DISTINCT (ticker, {date_col})) as duplicate_rows
-            FROM {table}
-            """
+        total_rows_query = f"""
+        SELECT 
+            count(*) as total_rows,
+            count(*) - count(DISTINCT (ticker, {date_col})) as duplicate_rows
+        FROM {table}
+        """
         total_stats = db.client.command(total_rows_query)
         print("\nRow statistics:")
         print(f"Total rows: {total_stats[0]}")
@@ -230,26 +220,15 @@ def analyze_all_tables():
         print("\nDate range:", date_range)
         
         # Check daily counts with formatted date
-        if table == 'stock_news':
-            daily_counts = db.client.command(f"""
-                SELECT 
-                    formatDateTime(toDate({date_col}), '%m-%d') as date,
-                    count(*) as total_rows,
-                    count(DISTINCT arrayJoin(tickers)) as unique_tickers
-                FROM {table}
-                GROUP BY toDate({date_col})
-                ORDER BY toDate({date_col})
-            """)
-        else:
-            daily_counts = db.client.command(f"""
-                SELECT 
-                    formatDateTime(toDate({date_col}), '%m-%d') as date,
-                    count(*) as total_rows,
-                    count(DISTINCT ticker) as unique_tickers
-                FROM {table}
-                GROUP BY toDate({date_col})
-                ORDER BY toDate({date_col})
-            """)
+        daily_counts = db.client.command(f"""
+            SELECT 
+                formatDateTime(toDate({date_col}), '%m-%d') as date,
+                count(*) as total_rows,
+                count(DISTINCT ticker) as unique_tickers
+            FROM {table}
+            GROUP BY toDate({date_col})
+            ORDER BY toDate({date_col})
+        """)
         print("\nDaily counts:", daily_counts)
         
         # Special handling for each table type
@@ -302,18 +281,6 @@ def analyze_all_tables():
             """)
             print("\nIndicator type counts:", indicator_counts)
             
-        elif table == 'stock_news':
-            # Check news sources and counts
-            news_stats = db.client.command(f"""
-                SELECT
-                    count(*) as total_news,
-                    count(DISTINCT publisher) as unique_publishers,
-                    count(DISTINCT id) as unique_articles,
-                    count(DISTINCT arrayJoin(tickers)) as unique_tickers
-                FROM {table}
-            """)
-            print("\nNews statistics:", news_stats)
-            
         elif table == 'stock_master':
             # Check completeness of master table
             master_stats = db.client.command(f"""
@@ -326,28 +293,32 @@ def analyze_all_tables():
                 FROM {table}
             """)
             print("\nMaster table completeness:", master_stats)
+            
+        elif table == 'stock_normalized':
+            # Check normalized value ranges
+            normalized_stats = db.client.command(f"""
+                SELECT
+                    count(*) as total_rows,
+                    round(avg(close), 2) as avg_normalized_close,
+                    round(avg(volume), 2) as avg_normalized_volume,
+                    round(avg(rsi_14), 2) as avg_normalized_rsi,
+                    round(avg(sma_20), 2) as avg_normalized_sma20,
+                    round(avg(macd_value), 2) as avg_normalized_macd
+                FROM {table}
+                WHERE close IS NOT NULL
+            """)
+            print("\nNormalized value statistics:", normalized_stats)
         
         # Get sample of tickers and their counts
-        if table == 'stock_news':
-            ticker_counts = db.client.command(f"""
-                SELECT 
-                    arrayJoin(tickers) as ticker,
-                    count(*) as count
-                FROM {table}
-                GROUP BY ticker
-                ORDER BY count DESC
-                LIMIT 5
-            """)
-        else:
-            ticker_counts = db.client.command(f"""
-                SELECT 
-                    ticker,
-                    count(*) as count
-                FROM {table}
-                GROUP BY ticker
-                ORDER BY count DESC
-                LIMIT 5
-            """)
+        ticker_counts = db.client.command(f"""
+            SELECT 
+                ticker,
+                count(*) as count
+            FROM {table}
+            GROUP BY ticker
+            ORDER BY count DESC
+            LIMIT 5
+        """)
         print("\nTop 5 tickers by count:", ticker_counts)
 
 if __name__ == "__main__":

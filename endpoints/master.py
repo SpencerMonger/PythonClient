@@ -665,11 +665,19 @@ async def create_master_table(db: ClickHouseDB) -> None:
         LEFT JOIN minute_trades t ON b.ticker = t.ticker AND b.timestamp = t.timestamp
         LEFT JOIN indicator_metrics i ON b.ticker = i.ticker AND b.timestamp = i.timestamp
         ORDER BY b.timestamp, b.ticker
-        POPULATE
         """
         
         db.client.command(view_query)
         print("Created materialized view successfully")
+        
+        # Populate the master table with existing data
+        populate_query = f"""
+        INSERT INTO {db.database}.{config.TABLE_STOCK_MASTER}
+        {view_query[view_query.find('WITH'):]}
+        """
+        
+        db.client.command(populate_query)
+        print("Populated master table with existing data")
         
     except Exception as e:
         print(f"Error creating master table: {str(e)}")
