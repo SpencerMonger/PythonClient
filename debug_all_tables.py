@@ -176,10 +176,91 @@ def check_master_consistency(db: ClickHouseDB) -> None:
     
     return consistency_checks
 
+def get_table_info(db: ClickHouseDB, table_name: str) -> dict:
+    """Get basic information about a table"""
+    try:
+        # First check if table exists
+        exists_query = f"""
+        SELECT count(*) as cnt
+        FROM system.tables 
+        WHERE database = '{db.database}' AND name = '{table_name}'
+        """
+        exists_result = db.client.query(exists_query)
+        if exists_result.result_rows[0][0] == 0:
+            return {
+                'table_name': table_name,
+                'exists': False,
+                'error': 'Table does not exist'
+            }
+
+        # Get column information first to determine timestamp column
+        columns_query = f"""
+            SELECT name, type
+            FROM system.columns
+            WHERE database = '{db.database}' AND table = '{table_name}'
+        """
+        columns = db.client.query(columns_query).result_rows
+        
+        if not columns:
+            return {
+                'table_name': table_name,
+                'exists': True,
+                'error': 'No columns found'
+            }
+
+        # Convert columns to list of dicts
+        columns_info = [{'name': col[0], 'type': col[1]} for col in columns]
+
+        # Determine timestamp column
+        timestamp_col = 'sip_timestamp' if table_name in ['stock_trades', 'stock_quotes'] else 'timestamp'
+        
+        # Verify timestamp column exists
+        if not any(col['name'] == timestamp_col for col in columns_info):
+            return {
+                'table_name': table_name,
+                'exists': True,
+                'columns': columns_info,
+                'error': f'No {timestamp_col} column found'
+            }
+
+        # Get table statistics
+        stats_query = f"""
+            SELECT 
+                count(*) as total_rows,
+                count(DISTINCT ticker) as unique_tickers,
+                min({timestamp_col}) as earliest_date,
+                max({timestamp_col}) as latest_date
+            FROM {db.database}.{table_name}
+        """
+        stats = db.client.query(stats_query)
+        
+        # Convert stats to dict
+        stats_dict = {
+            'total_rows': stats.result_rows[0][0],
+            'unique_tickers': stats.result_rows[0][1],
+            'earliest_date': stats.result_rows[0][2],
+            'latest_date': stats.result_rows[0][3]
+        }
+        
+        return {
+            'table_name': table_name,
+            'exists': True,
+            'stats': stats_dict,
+            'columns': columns_info
+        }
+
+    except Exception as e:
+        return {
+            'table_name': table_name,
+            'exists': True,
+            'error': str(e)
+        }
+
 def analyze_all_tables():
+    """Generate a simple readout of all tables in the database"""
     db = ClickHouseDB()
     
-    # List of tables to check
+    # List of tables to analyze
     tables = [
         'stock_bars',
         'stock_daily',
@@ -190,136 +271,33 @@ def analyze_all_tables():
         'stock_normalized'
     ]
     
+    print("\nClickHouse Database Table Analysis")
+    print("=" * 50)
+    
     for table in tables:
-        print(f"\n{'='*50}")
-        print(f"Analyzing {table}")
-        print('='*50)
+        info = get_table_info(db, table)
         
-        # Get date column name
-        date_col = 'sip_timestamp' if table in ['stock_trades', 'stock_quotes'] else 'timestamp'
+        print(f"\nTable: {info['table_name']}")
+        print("-" * 30)
         
-        # Get total rows and duplicates
-        total_rows_query = f"""
-        SELECT 
-            count(*) as total_rows,
-            count(*) - count(DISTINCT (ticker, {date_col})) as duplicate_rows
-        FROM {table}
-        """
-        total_stats = db.client.command(total_rows_query)
-        print("\nRow statistics:")
-        print(f"Total rows: {total_stats[0]}")
-        print(f"Duplicate rows: {total_stats[1]}")
-        
-        # Check date range
-        date_range = db.client.command(f"""
-            SELECT 
-                min({date_col}) as min_date,
-                max({date_col}) as max_date
-            FROM {table}
-        """)
-        print("\nDate range:", date_range)
-        
-        # Check daily counts with formatted date
-        daily_counts = db.client.command(f"""
-            SELECT 
-                formatDateTime(toDate({date_col}), '%m-%d') as date,
-                count(*) as total_rows,
-                count(DISTINCT ticker) as unique_tickers
-            FROM {table}
-            GROUP BY toDate({date_col})
-            ORDER BY toDate({date_col})
-        """)
-        print("\nDaily counts:", daily_counts)
-        
-        # Special handling for each table type
-        if table == 'stock_bars':
-            # Check for missing prices
-            price_stats = db.client.command(f"""
-                SELECT 
-                    count(*) as total_rows,
-                    countIf(open IS NULL) as null_open,
-                    countIf(close IS NULL) as null_close,
-                    countIf(high IS NULL) as null_high,
-                    countIf(low IS NULL) as null_low
-                FROM {table}
-            """)
-            print("\nPrice statistics:", price_stats)
+        if 'error' in info:
+            print(f"Error: {info['error']}")
+            print("-" * 30)
+            continue
             
-        elif table == 'stock_trades':
-            # Check trade sizes and prices
-            trade_stats = db.client.command(f"""
-                SELECT
-                    count(*) as total_trades,
-                    avg(size) as avg_size,
-                    avg(price) as avg_price,
-                    count(DISTINCT exchange) as unique_exchanges
-                FROM {table}
-            """)
-            print("\nTrade statistics:", trade_stats)
-            
-        elif table == 'stock_quotes':
-            # Check quote spreads
-            quote_stats = db.client.command(f"""
-                SELECT
-                    count(*) as total_quotes,
-                    avg(ask_price - bid_price) as avg_spread,
-                    count(DISTINCT ask_exchange) as unique_ask_exchanges,
-                    count(DISTINCT bid_exchange) as unique_bid_exchanges
-                FROM {table}
-            """)
-            print("\nQuote statistics:", quote_stats)
-            
-        elif table == 'stock_indicators':
-            # Check indicator types and their counts
-            indicator_counts = db.client.command(f"""
-                SELECT 
-                    indicator_type,
-                    count(*) as count
-                FROM {table}
-                GROUP BY indicator_type
-                ORDER BY count DESC
-            """)
-            print("\nIndicator type counts:", indicator_counts)
-            
-        elif table == 'stock_master':
-            # Check completeness of master table
-            master_stats = db.client.command(f"""
-                SELECT
-                    count(*) as total_rows,
-                    countIf(close IS NOT NULL) as rows_with_price,
-                    countIf(quote_count > 0) as rows_with_quotes,
-                    countIf(trade_count > 0) as rows_with_trades,
-                    countIf(sma_20 IS NOT NULL) as rows_with_indicators
-                FROM {table}
-            """)
-            print("\nMaster table completeness:", master_stats)
-            
-        elif table == 'stock_normalized':
-            # Check normalized value ranges
-            normalized_stats = db.client.command(f"""
-                SELECT
-                    count(*) as total_rows,
-                    round(avg(close), 2) as avg_normalized_close,
-                    round(avg(volume), 2) as avg_normalized_volume,
-                    round(avg(rsi_14), 2) as avg_normalized_rsi,
-                    round(avg(sma_20), 2) as avg_normalized_sma20,
-                    round(avg(macd_value), 2) as avg_normalized_macd
-                FROM {table}
-                WHERE close IS NOT NULL
-            """)
-            print("\nNormalized value statistics:", normalized_stats)
+        if 'stats' in info:
+            print(f"Total Rows: {info['stats']['total_rows']:,}")
+            print(f"Unique Tickers: {info['stats']['unique_tickers']:,}")
+            print(f"Date Range: {info['stats']['earliest_date']} to {info['stats']['latest_date']}")
         
-        # Get sample of tickers and their counts
-        ticker_counts = db.client.command(f"""
-            SELECT 
-                ticker,
-                count(*) as count
-            FROM {table}
-            GROUP BY ticker
-            ORDER BY count DESC
-            LIMIT 5
-        """)
-        print("\nTop 5 tickers by count:", ticker_counts)
+        if 'columns' in info:
+            print("\nColumns:")
+            for col in info['columns']:
+                print(f"  - {col['name']} ({col['type']})")
+        
+        print("-" * 30)
+    
+    db.close()
 
 if __name__ == "__main__":
     analyze_all_tables() 
