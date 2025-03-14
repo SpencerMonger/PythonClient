@@ -9,13 +9,13 @@ async def init_tables(db: ClickHouseDB) -> None:
     """
     Initialize all tables in ClickHouse
     """
+    # First initialize core tables
     await bars.init_bars_table(db)
     await bars_daily.init_bars_table(db)  # Initialize daily bars table
     await trades.init_trades_table(db)
     await quotes.init_quotes_table(db)
     await news.init_news_table(db)
     await indicators.init_indicators_table(db)
-    await master.init_master_table(db)  # Initialize the master table last
 
 async def init_master_only(db: ClickHouseDB) -> None:
     """
@@ -58,7 +58,7 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
         
         # Fetch and store trade data
         print(f"\nFetching trade data for {ticker}...")
-        trade_data = await trades.fetch_trades(ticker, from_date)
+        trade_data = await trades.fetch_trades(ticker, from_date, to_date)
         if trade_data:
             print(f"Found {len(trade_data)} trades")
             print("Storing trade data...")
@@ -69,7 +69,7 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
         
         # Fetch and store quote data
         print(f"\nFetching quote data for {ticker}...")
-        quote_data = await quotes.fetch_quotes(ticker, from_date)
+        quote_data = await quotes.fetch_quotes(ticker, from_date, to_date)
         if quote_data:
             print(f"Found {len(quote_data)} quotes")
             print("Storing quote data...")
@@ -80,7 +80,7 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
         
         # Fetch and store news data
         print(f"\nFetching news data for {ticker}...")
-        news_data = await news.fetch_news(ticker)
+        news_data = await news.fetch_news(ticker, from_date, to_date)
         if news_data:
             print(f"Found {len(news_data)} news items")
             print("Storing news data...")
@@ -111,12 +111,12 @@ async def main(tickers: List[str], from_date: datetime, to_date: datetime) -> No
     db = ClickHouseDB()
     
     try:
-        # Initialize tables
-        print("\nInitializing tables...")
+        # Initialize core tables first (not master table)
+        print("\nInitializing core tables...")
         await init_tables(db)
-        print("Tables initialized successfully")
+        print("Core tables initialized successfully")
         
-        # Process each ticker
+        # Process each ticker to fetch and store data
         for ticker in tickers:
             print(f"\n{'='*50}")
             print(f"Processing {ticker}...")
@@ -124,6 +124,12 @@ async def main(tickers: List[str], from_date: datetime, to_date: datetime) -> No
             await process_ticker(db, ticker, from_date, to_date)
             print(f"Finished processing {ticker}")
             print('='*50)
+            
+        # Initialize master table after all data is fetched
+        # This will create the table and materialized view if they don't exist
+        print("\nInitializing master table...")
+        await init_master_only(db)
+        print("Master table initialized successfully")
             
     except Exception as e:
         print(f"Error in main process: {str(e)}")

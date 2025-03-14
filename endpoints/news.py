@@ -33,16 +33,22 @@ def parse_utc_timestamp(timestamp_str: str) -> datetime:
     except (ValueError, AttributeError):
         return datetime.utcnow()
 
-async def fetch_news(ticker: str) -> List[Dict]:
+async def fetch_news(ticker: str, from_date: datetime, to_date: datetime) -> List[Dict]:
     """
-    Fetch news for a ticker
+    Fetch news for a ticker between dates
     """
     client = get_rest_client()
     news_items = []
     
+    # Format dates as YYYY-MM-DD
+    from_str = from_date.strftime("%Y-%m-%d")
+    to_str = to_date.strftime("%Y-%m-%d")
+    
     try:
         for news in client.list_ticker_news(
             ticker=ticker,
+            published_utc_gte=from_str,
+            published_utc_lt=to_str,
             order="desc",
             limit=1000
         ):

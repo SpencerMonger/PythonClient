@@ -24,20 +24,22 @@ QUOTES_SCHEMA = {
     "trf_timestamp": "Nullable(DateTime64(9))"
 }
 
-async def fetch_quotes(ticker: str, date: datetime) -> List[Dict]:
+async def fetch_quotes(ticker: str, from_date: datetime, to_date: datetime) -> List[Dict]:
     """
-    Fetch quotes for a ticker on a specific date
+    Fetch quotes for a ticker between dates
     """
     client = get_rest_client()
     quotes = []
     
-    # Format date as YYYY-MM-DD
-    date_str = date.strftime("%Y-%m-%d")
+    # Format dates as YYYY-MM-DD
+    from_str = from_date.strftime("%Y-%m-%d")
+    to_str = to_date.strftime("%Y-%m-%d")
     
     try:
         for quote in client.list_quotes(
             ticker=ticker,
-            timestamp=date_str,
+            timestamp_gte=from_str,
+            timestamp_lt=to_str,
             limit=50000
         ):
             quotes.append({

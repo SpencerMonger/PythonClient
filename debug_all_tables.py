@@ -195,11 +195,32 @@ def analyze_all_tables():
         print(f"Analyzing {table}")
         print('='*50)
         
-        # Check date range
+        # Get date column name
         date_col = 'sip_timestamp' if table in ['stock_trades', 'stock_quotes'] else 'timestamp'
         if table == 'stock_news':
             date_col = 'published_utc'
-            
+        
+        # Get total rows and duplicates
+        if table == 'stock_news':
+            total_rows_query = f"""
+            SELECT 
+                count(*) as total_rows,
+                count(*) - count(DISTINCT (arrayJoin(tickers), {date_col})) as duplicate_rows
+            FROM {table}
+            """
+        else:
+            total_rows_query = f"""
+            SELECT 
+                count(*) as total_rows,
+                count(*) - count(DISTINCT (ticker, {date_col})) as duplicate_rows
+            FROM {table}
+            """
+        total_stats = db.client.command(total_rows_query)
+        print("\nRow statistics:")
+        print(f"Total rows: {total_stats[0]}")
+        print(f"Duplicate rows: {total_stats[1]}")
+        
+        # Check date range
         date_range = db.client.command(f"""
             SELECT 
                 min({date_col}) as min_date,
@@ -208,26 +229,26 @@ def analyze_all_tables():
         """)
         print("\nDate range:", date_range)
         
-        # Check daily counts
+        # Check daily counts with formatted date
         if table == 'stock_news':
             daily_counts = db.client.command(f"""
                 SELECT 
-                    toDate({date_col}) as date,
+                    formatDateTime(toDate({date_col}), '%m-%d') as date,
                     count(*) as total_rows,
                     count(DISTINCT arrayJoin(tickers)) as unique_tickers
                 FROM {table}
-                GROUP BY date
-                ORDER BY date
+                GROUP BY toDate({date_col})
+                ORDER BY toDate({date_col})
             """)
         else:
             daily_counts = db.client.command(f"""
                 SELECT 
-                    toDate({date_col}) as date,
+                    formatDateTime(toDate({date_col}), '%m-%d') as date,
                     count(*) as total_rows,
                     count(DISTINCT ticker) as unique_tickers
                 FROM {table}
-                GROUP BY date
-                ORDER BY date
+                GROUP BY toDate({date_col})
+                ORDER BY toDate({date_col})
             """)
         print("\nDaily counts:", daily_counts)
         

@@ -80,47 +80,141 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
     Process latest minute of data for a ticker
     """
     try:
-        # Convert dates to UTC for API calls
+        start_time = time.time()
+        print(f"\nStarting processing for {ticker} at {datetime.now().strftime('%H:%M:%S')}")
+        
+        # Convert dates to UTC for API calls and ensure we're only getting 1 minute of data
         from_date_utc = from_date.astimezone(pytz.UTC)
         to_date_utc = to_date.astimezone(pytz.UTC)
         
-        # Fetch and store bar data
-        print(f"\nFetching bar data for {ticker}...")
-        bar_data = await bars.fetch_bars(ticker, from_date_utc, to_date_utc)
-        if bar_data:
-            print(f"Found {len(bar_data)} bars")
-            await bars.store_bars(db, bar_data)
+        # Add debug info about time range
+        print(f"[{ticker}] Fetching data for time range: {from_date_utc.strftime('%Y-%m-%d %H:%M:%S')} to {to_date_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC")
         
-        # Fetch and store daily bar data (needed for master table calculations)
-        print(f"\nFetching daily bar data for {ticker}...")
-        daily_bar_data = await bars_daily.fetch_bars(ticker, from_date_utc, to_date_utc)
-        if daily_bar_data:
-            print(f"Found {len(daily_bar_data)} daily bars")
-            await bars_daily.store_bars(db, daily_bar_data)
+        # Convert timestamps to nanoseconds for trades and quotes filtering
+        from_ts = int(from_date_utc.timestamp() * 1_000_000_000)  # Convert to nanoseconds
+        to_ts = int(to_date_utc.timestamp() * 1_000_000_000)  # Convert to nanoseconds
+        
+        # For bars, fetch today's data starting from market open
+        today_open = from_date_utc.replace(hour=13, minute=30, second=0, microsecond=0)  # 9:30 AM ET = 13:30 UTC
+        
+        # Fetch and store bar data
+        print(f"[{ticker}] Fetching bar data...")
+        bar_start = time.time()
+        bar_data = await bars.fetch_bars(ticker, today_open, to_date_utc)
+        if bar_data and len(bar_data) > 0:
+            # Get the most recent bar
+            most_recent_bar = bar_data[-1]
+            print(f"[{ticker}] Debug - Most recent bar timestamp: {most_recent_bar['timestamp']} (type: {type(most_recent_bar['timestamp'])})")
+            print(f"[{ticker}] Debug - Most recent bar data: {most_recent_bar}")
+            
+            print(f"[{ticker}] Found most recent bar (took {time.time() - bar_start:.2f}s)")
+            print(f"[{ticker}] Storing bar data...")
+            store_start = time.time()
+            await bars.store_bars(db, [most_recent_bar])
+            print(f"[{ticker}] Stored bar data successfully (took {time.time() - store_start:.2f}s)")
+        else:
+            print(f"[{ticker}] No bar data found")
+        
+        # Fetch and store daily bar data - only if we're in a new day
+        current_day = datetime.now(pytz.UTC).date()
+        if from_date_utc.date() != current_day:
+            print(f"[{ticker}] Fetching daily bar data...")
+            daily_start = time.time()
+            daily_bar_data = await bars_daily.fetch_bars(ticker, from_date_utc, to_date_utc)
+            if daily_bar_data:
+                print(f"[{ticker}] Found {len(daily_bar_data)} daily bars (took {time.time() - daily_start:.2f}s)")
+                print(f"[{ticker}] Storing daily bar data...")
+                store_start = time.time()
+                await bars_daily.store_bars(db, daily_bar_data)
+                print(f"[{ticker}] Stored daily bar data successfully (took {time.time() - store_start:.2f}s)")
+            else:
+                print(f"[{ticker}] No daily bar data found")
         
         # Fetch and store trade data
-        print(f"\nFetching trade data for {ticker}...")
+        print(f"[{ticker}] Fetching trade data...")
+        trade_start = time.time()
         trade_data = await trades.fetch_trades(ticker, from_date_utc)
         if trade_data:
-            print(f"Found {len(trade_data)} trades")
-            await trades.store_trades(db, trade_data)
+            filtered_trades = [t for t in trade_data if from_ts <= t['sip_timestamp'] <= to_ts]
+            print(f"[{ticker}] Found {len(filtered_trades)} trades in time range (took {time.time() - trade_start:.2f}s)")
+            if filtered_trades:
+                print(f"[{ticker}] Storing trade data...")
+                store_start = time.time()
+                # Batch the trades if there are too many
+                if len(filtered_trades) > 10000:
+                    print(f"[{ticker}] Batching {len(filtered_trades)} trades for storage")
+                    batch_size = 10000
+                    for i in range(0, len(filtered_trades), batch_size):
+                        batch = filtered_trades[i:i + batch_size]
+                        await trades.store_trades(db, batch)
+                        print(f"[{ticker}] Stored batch {i//batch_size + 1} of {(len(filtered_trades) + batch_size - 1)//batch_size}")
+                else:
+                    await trades.store_trades(db, filtered_trades)
+                print(f"[{ticker}] Stored trade data successfully (took {time.time() - store_start:.2f}s)")
+        else:
+            print(f"[{ticker}] No trade data found")
         
         # Fetch and store quote data
-        print(f"\nFetching quote data for {ticker}...")
+        print(f"[{ticker}] Fetching quote data...")
+        quote_start = time.time()
         quote_data = await quotes.fetch_quotes(ticker, from_date_utc)
         if quote_data:
-            print(f"Found {len(quote_data)} quotes")
-            await quotes.store_quotes(db, quote_data)
+            filtered_quotes = [q for q in quote_data if from_ts <= q['sip_timestamp'] <= to_ts]
+            print(f"[{ticker}] Found {len(filtered_quotes)} quotes in time range (took {time.time() - quote_start:.2f}s)")
+            if filtered_quotes:
+                print(f"[{ticker}] Storing quote data...")
+                store_start = time.time()
+                # Batch the quotes if there are too many
+                if len(filtered_quotes) > 10000:
+                    print(f"[{ticker}] Batching {len(filtered_quotes)} quotes for storage")
+                    batch_size = 10000
+                    for i in range(0, len(filtered_quotes), batch_size):
+                        batch = filtered_quotes[i:i + batch_size]
+                        await quotes.store_quotes(db, batch)
+                        print(f"[{ticker}] Stored batch {i//batch_size + 1} of {(len(filtered_quotes) + batch_size - 1)//batch_size}")
+                else:
+                    await quotes.store_quotes(db, filtered_quotes)
+                print(f"[{ticker}] Stored quote data successfully (took {time.time() - store_start:.2f}s)")
+        else:
+            print(f"[{ticker}] No quote data found")
         
         # Fetch and store technical indicators
-        print(f"\nFetching technical indicators for {ticker}...")
-        indicator_data = await indicators.fetch_all_indicators(ticker, from_date_utc, to_date_utc)
+        print(f"[{ticker}] Fetching technical indicators...")
+        indicator_start = time.time()
+        indicator_data = await indicators.fetch_all_indicators(ticker, today_open, to_date_utc)  # Use same time range as bars
         if indicator_data:
-            print(f"Found {len(indicator_data)} indicators")
-            await indicators.store_indicators(db, indicator_data)
+            # Group indicators by type to get the latest value for each
+            latest_indicators = {}
+            for indicator in indicator_data:
+                indicator_type = indicator['indicator_type']
+                if indicator_type not in latest_indicators or indicator['timestamp'] > latest_indicators[indicator_type]['timestamp']:
+                    latest_indicators[indicator_type] = indicator
+            
+            # Convert to list and sort by timestamp
+            latest_indicator_list = list(latest_indicators.values())
+            latest_indicator_list.sort(key=lambda x: x['timestamp'])
+            
+            if latest_indicator_list:
+                print(f"[{ticker}] Debug - Latest indicator timestamp: {latest_indicator_list[-1]['timestamp']} (type: {type(latest_indicator_list[-1]['timestamp'])})")
+                print(f"[{ticker}] Debug - Latest indicator data: {latest_indicator_list[-1]}")
+                
+                print(f"[{ticker}] Found {len(latest_indicator_list)} latest indicators (took {time.time() - indicator_start:.2f}s)")
+                print(f"[{ticker}] Storing indicator data...")
+                store_start = time.time()
+                await indicators.store_indicators(db, latest_indicator_list)
+                print(f"[{ticker}] Stored indicator data successfully (took {time.time() - store_start:.2f}s)")
+            else:
+                print(f"[{ticker}] No indicators found in time range")
+        else:
+            print(f"[{ticker}] No indicator data found")
+            
+        total_time = time.time() - start_time
+        print(f"\n[{ticker}] Completed all operations in {total_time:.2f} seconds")
             
     except Exception as e:
-        print(f"Error processing {ticker}: {str(e)}")
+        print(f"[{ticker}] Error processing ticker: {str(e)}")
+        print(f"[{ticker}] Error type: {type(e).__name__}")
+        print(f"[{ticker}] Error occurred at {datetime.now().strftime('%H:%M:%S')}")
         raise e
 
 async def run_live_data(tickers: List[str]) -> None:
@@ -155,15 +249,31 @@ async def run_live_data(tickers: List[str]) -> None:
         
         while True:
             try:
-                # Check if market is open
+                # Get current time in Eastern Time
+                now = datetime.now(et_tz)
+                
+                # Calculate time until next run (10 seconds past the next minute)
+                current_minute = now.replace(second=0, microsecond=0)
+                next_minute = current_minute + timedelta(minutes=1)
+                target_time = next_minute.replace(second=10)
+                
+                # Calculate wait time until target time
+                wait_time = (target_time - now).total_seconds()
+                if wait_time <= 0:
+                    # If we've passed the target time, wait for the next minute
+                    target_time = target_time + timedelta(minutes=1)
+                    wait_time = (target_time - now).total_seconds()
+                
+                print(f"\nWaiting {wait_time:.2f} seconds until {target_time.strftime('%H:%M:%S')} ET...")
+                await asyncio.sleep(wait_time)
+                
+                # Check if market is open after waiting
                 if not is_market_open():
                     now = datetime.now(et_tz)
                     print(f"\nMarket is closed at {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-                    # Wait 1 minute before checking again
-                    await asyncio.sleep(60)
                     continue
                 
-                # Get current time in Eastern Time
+                # Calculate the minute we want to process (the previous minute)
                 now = datetime.now(et_tz)
                 current_minute = now.replace(second=0, microsecond=0)
                 previous_minute = current_minute - timedelta(minutes=1)
@@ -177,19 +287,11 @@ async def run_live_data(tickers: List[str]) -> None:
                     print(f"Completed processing {ticker} for {previous_minute.strftime('%H:%M')}")
                 
                 print('='*50)
-                
-                # Calculate wait time until 10 seconds after the next minute
-                next_minute = current_minute + timedelta(minutes=1)
-                wait_time = (next_minute - now).total_seconds() + 10
-                
-                if wait_time > 0:
-                    print(f"\nWaiting {wait_time:.2f} seconds until next update...")
-                    await asyncio.sleep(wait_time)
                     
             except Exception as e:
                 print(f"Error in processing cycle: {str(e)}")
-                # Wait 30 seconds before retrying on error
-                await asyncio.sleep(30)
+                # Wait until the next minute + 10 seconds before retrying
+                await asyncio.sleep(60)
                 
     except KeyboardInterrupt:
         print("\nStopping live data collection...")
