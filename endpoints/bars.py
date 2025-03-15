@@ -39,8 +39,19 @@ async def fetch_bars(ticker: str, from_date: datetime, to_date: datetime) -> Lis
             to=to_str,
             limit=50000
         ):
-            # Convert timestamp from milliseconds to datetime
-            timestamp = datetime.fromtimestamp(bar.timestamp / 1000.0)
+            # Convert timestamp from milliseconds to nanoseconds for DateTime64(9)
+            # bar.timestamp is in milliseconds, need to convert to nanoseconds
+            timestamp = bar.timestamp * 1_000_000  # ms to ns
+            
+            # Add sub-millisecond precision to match trades/quotes format
+            timestamp = int(timestamp + (timestamp % 1000))  # Add some sub-ms precision
+            
+            # Debug prints for the first bar only
+            if len(bars) == 0:
+                print(f"\nTimestamp debug for first bar:")
+                print(f"Original timestamp (ms): {bar.timestamp}")
+                print(f"Converted timestamp (ns): {timestamp}")
+                print(f"Timestamp length: {len(str(timestamp))} digits")
             
             # Convert any potential None values to appropriate types
             bars.append({
