@@ -33,9 +33,16 @@ async def init_master_only(db: ClickHouseDB) -> None:
         print(f"Error initializing master table: {str(e)}")
         raise e
 
-async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_date: datetime) -> None:
+async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_date: datetime, store_latest_only: bool = False) -> None:
     """
     Process all data for a ticker between dates
+    
+    Args:
+        db: Database connection
+        ticker: Ticker symbol
+        from_date: Start date
+        to_date: End date
+        store_latest_only: Whether to only store the latest row
     """
     try:
         ticker_start_time = time.time()
@@ -53,6 +60,10 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
             print(f"Timestamp type: {type(bar_data[0]['timestamp'])}")  # Debug print
             
             store_start_time = time.time()
+            # If store_latest_only is True, only store the most recent bar
+            if store_latest_only and bar_data:
+                bar_data = [bar_data[-1]]  # Keep only the last bar
+                
             await bars.store_bars(db, bar_data)
             store_time = time.time() - store_start_time
             print(f"Bar data stored successfully in {store_time:.2f} seconds")
@@ -70,6 +81,10 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
             print(f"Found {len(daily_bar_data)} daily bars (fetched in {daily_fetch_time:.2f} seconds)")
             print("Storing daily bar data...")
             store_start_time = time.time()
+            # If store_latest_only is True, only store the most recent daily bar
+            if store_latest_only and daily_bar_data:
+                daily_bar_data = [daily_bar_data[-1]]
+                
             await bars_daily.store_bars(db, daily_bar_data)
             store_time = time.time() - store_start_time
             print(f"Daily bar data stored successfully in {store_time:.2f} seconds")
@@ -89,6 +104,10 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
             print(f"Timestamp type: {type(trade_data[0]['sip_timestamp'])}")  # Debug print
             
             store_start_time = time.time()
+            # If store_latest_only is True, only store the most recent trade
+            if store_latest_only and trade_data:
+                trade_data = [trade_data[-1]]
+                
             await trades.store_trades(db, trade_data)
             store_time = time.time() - store_start_time
             print(f"Trade data stored successfully in {store_time:.2f} seconds")
@@ -109,6 +128,10 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
             print(f"Timestamp type: {type(quote_data[0]['sip_timestamp'])}")  # Debug print
             
             store_start_time = time.time()
+            # If store_latest_only is True, only store the most recent quote
+            if store_latest_only and quote_data:
+                quote_data = [quote_data[-1]]
+                
             await quotes.store_quotes(db, quote_data)
             store_time = time.time() - store_start_time
             print(f"Quote data stored successfully in {store_time:.2f} seconds")
@@ -125,6 +148,10 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
             print(f"Found {len(news_data)} news items (fetched in {fetch_time:.2f} seconds)")
             print("Storing news data...")
             start_time = time.time()
+            # If store_latest_only is True, only store the most recent news
+            if store_latest_only and news_data:
+                news_data = [news_data[-1]]
+                
             await news.store_news(db, news_data)
             print(f"News data stored successfully in {time.time() - start_time:.2f} seconds")
         else:
@@ -139,6 +166,16 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
             print(f"Found {len(indicator_data)} indicators (fetched in {fetch_time:.2f} seconds)")
             print("Storing indicator data...")
             start_time = time.time()
+            # If store_latest_only is True, only store the most recent indicators
+            if store_latest_only and indicator_data:
+                # Group by indicator type and keep latest for each
+                latest_indicators = {}
+                for indicator in indicator_data:
+                    indicator_type = indicator['indicator_type']
+                    if indicator_type not in latest_indicators or indicator['timestamp'] > latest_indicators[indicator_type]['timestamp']:
+                        latest_indicators[indicator_type] = indicator
+                indicator_data = list(latest_indicators.values())
+                
             await indicators.store_indicators(db, indicator_data)
             print(f"Indicator data stored successfully in {time.time() - start_time:.2f} seconds")
         else:
@@ -150,9 +187,15 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
         print(f"Error processing {ticker}: {str(e)}")
         raise e
 
-async def main(tickers: List[str], from_date: datetime, to_date: datetime) -> None:
+async def main(tickers: List[str], from_date: datetime, to_date: datetime, store_latest_only: bool = False) -> None:
     """
     Main function to process data for multiple tickers
+    
+    Args:
+        tickers: List of ticker symbols
+        from_date: Start date
+        to_date: End date
+        store_latest_only: Whether to only store the latest row per ticker
     """
     total_start_time = time.time()
     db = ClickHouseDB()
@@ -170,7 +213,7 @@ async def main(tickers: List[str], from_date: datetime, to_date: datetime) -> No
             print(f"Processing {ticker}...")
             print(f"Time range: {from_date.strftime('%Y-%m-%d')} to {to_date.strftime('%Y-%m-%d')}")
             start_time = time.time()
-            await process_ticker(db, ticker, from_date, to_date)
+            await process_ticker(db, ticker, from_date, to_date, store_latest_only)
             print(f"Finished processing {ticker} in {time.time() - start_time:.2f} seconds")
             print('='*50)
             
