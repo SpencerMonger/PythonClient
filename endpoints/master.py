@@ -144,7 +144,9 @@ async def create_normalized_table(db: ClickHouseDB) -> None:
         CREATE TABLE IF NOT EXISTS {db.database}.stock_normalized (
             {columns_def}
         ) ENGINE = MergeTree()
+        PRIMARY KEY (timestamp, ticker)
         ORDER BY (timestamp, ticker)
+        SETTINGS index_granularity = 8192
         """
         db.client.command(create_table_query)
         print("Created normalized table successfully")
@@ -154,123 +156,131 @@ async def create_normalized_table(db: ClickHouseDB) -> None:
         CREATE MATERIALIZED VIEW IF NOT EXISTS {db.database}.stock_normalized_mv 
         TO {db.database}.stock_normalized
         AS
-        SELECT
-            ticker,
-            timestamp,
-            target,
-            quote_conditions,
-            trade_conditions,
-            ask_exchange,
-            bid_exchange,
-            trade_exchange,
-            -- Apply sigmoid normalization to scale values between 0 and 5
-            -- Formula: 5 / (1 + exp(-5 * (x - min) / (max - min)))
-            -- For each field, we use a reasonable min/max range based on the data type
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(open, 0), 2) / 1000))), 2) as open,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(high, 0), 2) / 1000))), 2) as high,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(low, 0), 2) / 1000))), 2) as low,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(close, 0), 2) / 1000))), 2) as close,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(volume, 0), 2) / 1000000))), 2) as volume,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(vwap, 0), 2) / 1000))), 2) as vwap,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(transactions, 0), 2) / 1000))), 2) as transactions,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(price_diff, 0), 2) / 10))), 2) as price_diff,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(max_price_diff, 0), 2) / 10))), 2) as max_price_diff,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(avg_bid_price, 0), 2) / 1000))), 2) as avg_bid_price,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(avg_ask_price, 0), 2) / 1000))), 2) as avg_ask_price,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(min_bid_price, 0), 2) / 1000))), 2) as min_bid_price,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(max_ask_price, 0), 2) / 1000))), 2) as max_ask_price,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(total_bid_size, 0), 2) / 100000))), 2) as total_bid_size,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(total_ask_size, 0), 2) / 100000))), 2) as total_ask_size,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(quote_count, 0), 2) / 1000))), 2) as quote_count,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(avg_trade_price, 0), 2) / 1000))), 2) as avg_trade_price,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(min_trade_price, 0), 2) / 1000))), 2) as min_trade_price,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(max_trade_price, 0), 2) / 1000))), 2) as max_trade_price,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(total_trade_size, 0), 2) / 100000))), 2) as total_trade_size,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(trade_count, 0), 2) / 1000))), 2) as trade_count,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_5, 0), 2) / 1000))), 2) as sma_5,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_9, 0), 2) / 1000))), 2) as sma_9,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_12, 0), 2) / 1000))), 2) as sma_12,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_20, 0), 2) / 1000))), 2) as sma_20,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_50, 0), 2) / 1000))), 2) as sma_50,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_100, 0), 2) / 1000))), 2) as sma_100,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_200, 0), 2) / 1000))), 2) as sma_200,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(ema_9, 0), 2) / 1000))), 2) as ema_9,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(ema_12, 0), 2) / 1000))), 2) as ema_12,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(ema_20, 0), 2) / 1000))), 2) as ema_20,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(macd_value, 0), 2) / 10))), 2) as macd_value,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(macd_signal, 0), 2) / 10))), 2) as macd_signal,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(macd_histogram, 0), 2) / 10))), 2) as macd_histogram,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(rsi_14, 0), 2) / 100))), 2) as rsi_14,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(daily_high, 0), 2) / 1000))), 2) as daily_high,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(daily_low, 0), 2) / 1000))), 2) as daily_low,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(previous_close, 0), 2) / 1000))), 2) as previous_close,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_current, 0), 2) / 100))), 2) as tr_current,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_high_close, 0), 2) / 100))), 2) as tr_high_close,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_low_close, 0), 2) / 100))), 2) as tr_low_close,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_value, 0), 2) / 100))), 2) as tr_value,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(atr_value, 0), 2) / 100))), 2) as atr_value
-        FROM {db.database}.{config.TABLE_STOCK_MASTER}
+        SELECT *
+        FROM (
+            SELECT
+                ticker,
+                timestamp,
+                target,
+                quote_conditions,
+                trade_conditions,
+                ask_exchange,
+                bid_exchange,
+                trade_exchange,
+                -- Apply sigmoid normalization to scale values between 0 and 5
+                -- Formula: 5 / (1 + exp(-5 * (x - min) / (max - min)))
+                -- For each field, we use a reasonable min/max range based on the data type
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(open, 0), 2) / 1000))), 2) as open,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(high, 0), 2) / 1000))), 2) as high,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(low, 0), 2) / 1000))), 2) as low,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(close, 0), 2) / 1000))), 2) as close,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(volume, 0), 2) / 1000000))), 2) as volume,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(vwap, 0), 2) / 1000))), 2) as vwap,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(transactions, 0), 2) / 1000))), 2) as transactions,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(price_diff, 0), 2) / 10))), 2) as price_diff,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(max_price_diff, 0), 2) / 10))), 2) as max_price_diff,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(avg_bid_price, 0), 2) / 1000))), 2) as avg_bid_price,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(avg_ask_price, 0), 2) / 1000))), 2) as avg_ask_price,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(min_bid_price, 0), 2) / 1000))), 2) as min_bid_price,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(max_ask_price, 0), 2) / 1000))), 2) as max_ask_price,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(total_bid_size, 0), 2) / 100000))), 2) as total_bid_size,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(total_ask_size, 0), 2) / 100000))), 2) as total_ask_size,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(quote_count, 0), 2) / 1000))), 2) as quote_count,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(avg_trade_price, 0), 2) / 1000))), 2) as avg_trade_price,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(min_trade_price, 0), 2) / 1000))), 2) as min_trade_price,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(max_trade_price, 0), 2) / 1000))), 2) as max_trade_price,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(total_trade_size, 0), 2) / 100000))), 2) as total_trade_size,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(trade_count, 0), 2) / 1000))), 2) as trade_count,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_5, 0), 2) / 1000))), 2) as sma_5,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_9, 0), 2) / 1000))), 2) as sma_9,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_12, 0), 2) / 1000))), 2) as sma_12,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_20, 0), 2) / 1000))), 2) as sma_20,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_50, 0), 2) / 1000))), 2) as sma_50,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_100, 0), 2) / 1000))), 2) as sma_100,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_200, 0), 2) / 1000))), 2) as sma_200,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(ema_9, 0), 2) / 1000))), 2) as ema_9,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(ema_12, 0), 2) / 1000))), 2) as ema_12,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(ema_20, 0), 2) / 1000))), 2) as ema_20,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(macd_value, 0), 2) / 10))), 2) as macd_value,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(macd_signal, 0), 2) / 10))), 2) as macd_signal,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(macd_histogram, 0), 2) / 10))), 2) as macd_histogram,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(rsi_14, 0), 2) / 100))), 2) as rsi_14,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(daily_high, 0), 2) / 1000))), 2) as daily_high,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(daily_low, 0), 2) / 1000))), 2) as daily_low,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(previous_close, 0), 2) / 1000))), 2) as previous_close,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_current, 0), 2) / 100))), 2) as tr_current,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_high_close, 0), 2) / 100))), 2) as tr_high_close,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_low_close, 0), 2) / 100))), 2) as tr_low_close,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_value, 0), 2) / 100))), 2) as tr_value,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(atr_value, 0), 2) / 100))), 2) as atr_value
+            FROM {db.database}.{config.TABLE_STOCK_MASTER}
+            ORDER BY timestamp ASC, ticker ASC
+        )
         """
         
         db.client.command(view_query)
         print("Created materialized view successfully")
         
-        # Populate the normalized table with existing data from master table
+        # Populate the normalized table with existing data
         populate_query = f"""
         INSERT INTO {db.database}.stock_normalized
-        SELECT
-            ticker,
-            timestamp,
-            target,
-            quote_conditions,
-            trade_conditions,
-            ask_exchange,
-            bid_exchange,
-            trade_exchange,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(open, 0), 2) / 1000))), 2) as open,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(high, 0), 2) / 1000))), 2) as high,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(low, 0), 2) / 1000))), 2) as low,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(close, 0), 2) / 1000))), 2) as close,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(volume, 0), 2) / 1000000))), 2) as volume,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(vwap, 0), 2) / 1000))), 2) as vwap,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(transactions, 0), 2) / 1000))), 2) as transactions,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(price_diff, 0), 2) / 10))), 2) as price_diff,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(max_price_diff, 0), 2) / 10))), 2) as max_price_diff,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(avg_bid_price, 0), 2) / 1000))), 2) as avg_bid_price,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(avg_ask_price, 0), 2) / 1000))), 2) as avg_ask_price,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(min_bid_price, 0), 2) / 1000))), 2) as min_bid_price,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(max_ask_price, 0), 2) / 1000))), 2) as max_ask_price,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(total_bid_size, 0), 2) / 100000))), 2) as total_bid_size,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(total_ask_size, 0), 2) / 100000))), 2) as total_ask_size,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(quote_count, 0), 2) / 1000))), 2) as quote_count,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(avg_trade_price, 0), 2) / 1000))), 2) as avg_trade_price,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(min_trade_price, 0), 2) / 1000))), 2) as min_trade_price,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(max_trade_price, 0), 2) / 1000))), 2) as max_trade_price,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(total_trade_size, 0), 2) / 100000))), 2) as total_trade_size,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(trade_count, 0), 2) / 1000))), 2) as trade_count,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_5, 0), 2) / 1000))), 2) as sma_5,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_9, 0), 2) / 1000))), 2) as sma_9,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_12, 0), 2) / 1000))), 2) as sma_12,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_20, 0), 2) / 1000))), 2) as sma_20,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_50, 0), 2) / 1000))), 2) as sma_50,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_100, 0), 2) / 1000))), 2) as sma_100,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_200, 0), 2) / 1000))), 2) as sma_200,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(ema_9, 0), 2) / 1000))), 2) as ema_9,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(ema_12, 0), 2) / 1000))), 2) as ema_12,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(ema_20, 0), 2) / 1000))), 2) as ema_20,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(macd_value, 0), 2) / 10))), 2) as macd_value,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(macd_signal, 0), 2) / 10))), 2) as macd_signal,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(macd_histogram, 0), 2) / 10))), 2) as macd_histogram,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(rsi_14, 0), 2) / 100))), 2) as rsi_14,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(daily_high, 0), 2) / 1000))), 2) as daily_high,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(daily_low, 0), 2) / 1000))), 2) as daily_low,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(previous_close, 0), 2) / 1000))), 2) as previous_close,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_current, 0), 2) / 100))), 2) as tr_current,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_high_close, 0), 2) / 100))), 2) as tr_high_close,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_low_close, 0), 2) / 100))), 2) as tr_low_close,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_value, 0), 2) / 100))), 2) as tr_value,
-            round(5 / (1 + exp(-5 * (coalesce(nullIf(atr_value, 0), 2) / 100))), 2) as atr_value
-        FROM {db.database}.{config.TABLE_STOCK_MASTER}
+        SELECT *
+        FROM (
+            SELECT
+                ticker,
+                timestamp,
+                target,
+                quote_conditions,
+                trade_conditions,
+                ask_exchange,
+                bid_exchange,
+                trade_exchange,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(open, 0), 2) / 1000))), 2) as open,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(high, 0), 2) / 1000))), 2) as high,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(low, 0), 2) / 1000))), 2) as low,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(close, 0), 2) / 1000))), 2) as close,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(volume, 0), 2) / 1000000))), 2) as volume,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(vwap, 0), 2) / 1000))), 2) as vwap,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(transactions, 0), 2) / 1000))), 2) as transactions,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(price_diff, 0), 2) / 10))), 2) as price_diff,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(max_price_diff, 0), 2) / 10))), 2) as max_price_diff,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(avg_bid_price, 0), 2) / 1000))), 2) as avg_bid_price,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(avg_ask_price, 0), 2) / 1000))), 2) as avg_ask_price,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(min_bid_price, 0), 2) / 1000))), 2) as min_bid_price,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(max_ask_price, 0), 2) / 1000))), 2) as max_ask_price,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(total_bid_size, 0), 2) / 100000))), 2) as total_bid_size,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(total_ask_size, 0), 2) / 100000))), 2) as total_ask_size,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(quote_count, 0), 2) / 1000))), 2) as quote_count,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(avg_trade_price, 0), 2) / 1000))), 2) as avg_trade_price,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(min_trade_price, 0), 2) / 1000))), 2) as min_trade_price,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(max_trade_price, 0), 2) / 1000))), 2) as max_trade_price,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(total_trade_size, 0), 2) / 100000))), 2) as total_trade_size,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(trade_count, 0), 2) / 1000))), 2) as trade_count,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_5, 0), 2) / 1000))), 2) as sma_5,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_9, 0), 2) / 1000))), 2) as sma_9,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_12, 0), 2) / 1000))), 2) as sma_12,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_20, 0), 2) / 1000))), 2) as sma_20,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_50, 0), 2) / 1000))), 2) as sma_50,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_100, 0), 2) / 1000))), 2) as sma_100,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_200, 0), 2) / 1000))), 2) as sma_200,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(ema_9, 0), 2) / 1000))), 2) as ema_9,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(ema_12, 0), 2) / 1000))), 2) as ema_12,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(ema_20, 0), 2) / 1000))), 2) as ema_20,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(macd_value, 0), 2) / 10))), 2) as macd_value,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(macd_signal, 0), 2) / 10))), 2) as macd_signal,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(macd_histogram, 0), 2) / 10))), 2) as macd_histogram,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(rsi_14, 0), 2) / 100))), 2) as rsi_14,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(daily_high, 0), 2) / 1000))), 2) as daily_high,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(daily_low, 0), 2) / 1000))), 2) as daily_low,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(previous_close, 0), 2) / 1000))), 2) as previous_close,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_current, 0), 2) / 100))), 2) as tr_current,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_high_close, 0), 2) / 100))), 2) as tr_high_close,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_low_close, 0), 2) / 100))), 2) as tr_low_close,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_value, 0), 2) / 100))), 2) as tr_value,
+                round(5 / (1 + exp(-5 * (coalesce(nullIf(atr_value, 0), 2) / 100))), 2) as atr_value
+            FROM {db.database}.{config.TABLE_STOCK_MASTER}
+            ORDER BY timestamp ASC, ticker ASC
+        )
         """
         
         db.client.command(populate_query)
@@ -301,8 +311,14 @@ async def populate_master_table(db: ClickHouseDB) -> None:
         
         print(f"Processing data from {min_date} to {max_date}")
         
+        # First, collect all dates to process
+        dates_to_process = []
         while current_date <= max_date:
-            next_date = current_date + timedelta(days=1)
+            dates_to_process.append(current_date)
+            current_date = current_date + timedelta(days=1)
+        
+        # Process dates in ascending order
+        for current_date in sorted(dates_to_process):
             print(f"Processing {current_date}...")
             
             # Insert data for current day
@@ -337,6 +353,7 @@ async def populate_master_table(db: ClickHouseDB) -> None:
                     round(lagInFrame(close) OVER (PARTITION BY ticker ORDER BY toDate(timestamp)), 2) as previous_close
                 FROM {db.database}.stock_bars
                 WHERE toDate(timestamp) = '{current_date}'
+                ORDER BY timestamp ASC, ticker ASC
             ),
             -- Get quote data
             quote_metrics AS (
@@ -356,6 +373,7 @@ async def populate_master_table(db: ClickHouseDB) -> None:
                 FROM {db.database}.stock_quotes
                 WHERE toDate(sip_timestamp) = '{current_date}'
                 GROUP BY ticker, timestamp
+                ORDER BY timestamp ASC, ticker ASC
             ),
             -- Get trade data
             trade_metrics AS (
@@ -372,6 +390,7 @@ async def populate_master_table(db: ClickHouseDB) -> None:
                 FROM {db.database}.stock_trades
                 WHERE toDate(sip_timestamp) = '{current_date}'
                 GROUP BY ticker, timestamp
+                ORDER BY timestamp ASC, ticker ASC
             ),
             -- Get indicator data
             indicator_metrics AS (
@@ -395,6 +414,7 @@ async def populate_master_table(db: ClickHouseDB) -> None:
                 FROM {db.database}.stock_indicators
                 WHERE toDate(timestamp) = '{current_date}'
                 GROUP BY ticker, timestamp
+                ORDER BY timestamp ASC, ticker ASC
             )
             
             SELECT
@@ -474,11 +494,10 @@ async def populate_master_table(db: ClickHouseDB) -> None:
             LEFT JOIN quote_metrics q ON b.ticker = q.ticker AND b.timestamp = q.timestamp
             LEFT JOIN trade_metrics t ON b.ticker = t.ticker AND b.timestamp = t.timestamp
             LEFT JOIN indicator_metrics i ON b.ticker = i.ticker AND b.timestamp = i.timestamp
-            ORDER BY b.timestamp, b.ticker
+            ORDER BY b.timestamp ASC, ticker ASC
             """
             
             db.client.command(insert_query)
-            current_date = next_date
             
         print("Master table populated successfully")
         
@@ -497,7 +516,9 @@ async def create_master_table(db: ClickHouseDB) -> None:
         CREATE TABLE IF NOT EXISTS {db.database}.{config.TABLE_STOCK_MASTER} (
             {columns_def}
         ) ENGINE = MergeTree()
+        PRIMARY KEY (timestamp, ticker)
         ORDER BY (timestamp, ticker)
+        SETTINGS index_granularity = 8192
         """
         db.client.command(create_table_query)
         print("Created master table successfully")
@@ -673,7 +694,152 @@ async def create_master_table(db: ClickHouseDB) -> None:
         # Populate the master table with existing data
         populate_query = f"""
         INSERT INTO {db.database}.{config.TABLE_STOCK_MASTER}
-        {view_query[view_query.find('WITH'):]}
+        WITH 
+        minute_quotes AS (
+            SELECT
+                ticker,
+                toStartOfMinute(sip_timestamp) AS timestamp,
+                avg(bid_price) AS avg_bid_price,
+                avg(ask_price) AS avg_ask_price,
+                min(bid_price) AS min_bid_price,
+                max(ask_price) AS max_ask_price,
+                sum(bid_size) AS total_bid_size,
+                sum(ask_size) AS total_ask_size,
+                count(*) AS quote_count,
+                arrayStringConcat(arrayMap(x -> toString(x), arrayFlatten([coalesce(groupArray(conditions), [])]))) AS quote_conditions,
+                argMax(ask_exchange, sip_timestamp) AS ask_exchange,
+                argMax(bid_exchange, sip_timestamp) AS bid_exchange
+            FROM {db.database}.stock_quotes
+            GROUP BY ticker, timestamp
+        ),
+        minute_trades AS (
+            SELECT
+                ticker,
+                toStartOfMinute(sip_timestamp) AS timestamp,
+                avg(price) AS avg_trade_price,
+                min(price) AS min_trade_price,
+                max(price) AS max_trade_price,
+                sum(size) AS total_trade_size,
+                count(*) AS trade_count,
+                arrayStringConcat(arrayMap(x -> toString(x), arrayFlatten([coalesce(groupArray(conditions), [])]))) AS trade_conditions,
+                argMax(exchange, sip_timestamp) AS trade_exchange
+            FROM {db.database}.stock_trades
+            GROUP BY ticker, timestamp
+        ),
+        base_data AS (
+            SELECT 
+                ticker,
+                timestamp,
+                open,
+                high,
+                low,
+                close,
+                volume,
+                vwap,
+                transactions,
+                max(high) OVER (PARTITION BY ticker, toDate(timestamp)) as daily_high,
+                min(low) OVER (PARTITION BY ticker, toDate(timestamp)) as daily_low,
+                lagInFrame(close) OVER (PARTITION BY ticker ORDER BY toDate(timestamp)) as previous_close,
+                ((any(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 15 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100 as price_diff,
+                greatest(
+                    abs(((max(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100),
+                    abs(((min(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100)
+                ) as max_price_diff
+            FROM {db.database}.stock_bars
+        ),
+        indicator_metrics AS (
+            SELECT
+                ticker,
+                timestamp,
+                any(if(indicator_type = 'SMA_5', value, NULL)) AS sma_5,
+                any(if(indicator_type = 'SMA_9', value, NULL)) AS sma_9,
+                any(if(indicator_type = 'SMA_12', value, NULL)) AS sma_12,
+                any(if(indicator_type = 'SMA_20', value, NULL)) AS sma_20,
+                any(if(indicator_type = 'SMA_50', value, NULL)) AS sma_50,
+                any(if(indicator_type = 'SMA_100', value, NULL)) AS sma_100,
+                any(if(indicator_type = 'SMA_200', value, NULL)) AS sma_200,
+                any(if(indicator_type = 'EMA_9', value, NULL)) AS ema_9,
+                any(if(indicator_type = 'EMA_12', value, NULL)) AS ema_12,
+                any(if(indicator_type = 'EMA_20', value, NULL)) AS ema_20,
+                any(if(indicator_type = 'MACD', value, NULL)) AS macd_value,
+                any(if(indicator_type = 'MACD', signal, NULL)) AS macd_signal,
+                any(if(indicator_type = 'MACD', histogram, NULL)) AS macd_histogram,
+                any(if(indicator_type = 'RSI', value, NULL)) AS rsi_14
+            FROM {db.database}.stock_indicators
+            GROUP BY ticker, timestamp
+        )
+        SELECT
+            b.ticker,
+            b.timestamp,
+            b.open,
+            b.high,
+            b.low,
+            b.close,
+            b.volume,
+            b.vwap,
+            b.transactions,
+            b.price_diff,
+            b.max_price_diff,
+            multiIf(
+                b.price_diff <= -1, 0,
+                b.price_diff <= -0.5, 1,
+                b.price_diff <= 0, 2,
+                b.price_diff <= 0.5, 3,
+                b.price_diff <= 1, 4,
+                5
+            ) as target,
+            q.avg_bid_price,
+            q.avg_ask_price,
+            q.min_bid_price,
+            q.max_ask_price,
+            q.total_bid_size,
+            q.total_ask_size,
+            q.quote_count,
+            q.quote_conditions,
+            q.ask_exchange,
+            q.bid_exchange,
+            t.avg_trade_price,
+            t.min_trade_price,
+            t.max_trade_price,
+            t.total_trade_size,
+            t.trade_count,
+            t.trade_conditions,
+            t.trade_exchange,
+            i.sma_5,
+            i.sma_9,
+            i.sma_12,
+            i.sma_20,
+            i.sma_50,
+            i.sma_100,
+            i.sma_200,
+            i.ema_9,
+            i.ema_12,
+            i.ema_20,
+            i.macd_value,
+            i.macd_signal,
+            i.macd_histogram,
+            i.rsi_14,
+            b.daily_high,
+            b.daily_low,
+            b.previous_close,
+            b.daily_high - b.daily_low as tr_current,
+            b.daily_high - b.previous_close as tr_high_close,
+            b.daily_low - b.previous_close as tr_low_close,
+            greatest(
+                b.daily_high - b.daily_low,
+                abs(b.daily_high - b.previous_close),
+                abs(b.daily_low - b.previous_close)
+            ) as tr_value,
+            avg(greatest(
+                b.daily_high - b.daily_low,
+                abs(b.daily_high - b.previous_close),
+                abs(b.daily_low - b.previous_close)
+            )) OVER (PARTITION BY b.ticker ORDER BY b.timestamp ROWS BETWEEN 13 PRECEDING AND CURRENT ROW) as atr_value
+        FROM base_data b
+        LEFT JOIN minute_quotes q ON b.ticker = q.ticker AND b.timestamp = q.timestamp
+        LEFT JOIN minute_trades t ON b.ticker = t.ticker AND b.timestamp = t.timestamp
+        LEFT JOIN indicator_metrics i ON b.ticker = i.ticker AND b.timestamp = i.timestamp
+        ORDER BY b.timestamp, b.ticker
         """
         
         db.client.command(populate_query)

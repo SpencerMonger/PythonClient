@@ -69,7 +69,9 @@ class ClickHouseDB:
                 CREATE TABLE IF NOT EXISTS {self.database}.{table_name} (
                     {columns_def}
                 ) ENGINE = MergeTree()
-                ORDER BY tuple()
+                PRIMARY KEY (timestamp, ticker)
+                ORDER BY (timestamp, ticker)
+                SETTINGS index_granularity = 8192
                 """
                 self.client.command(query)
                 print(f"Created table {table_name}")
