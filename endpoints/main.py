@@ -55,19 +55,12 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
         
         if bar_data:
             print(f"Found {len(bar_data)} bars (fetched in {fetch_time:.2f} seconds)")
-            print("Storing bar data...")
-            print(f"Sample bar data structure: {bar_data[0]}")  # Debug print
-            print(f"Timestamp type: {type(bar_data[0]['timestamp'])}")  # Debug print
             
-            store_start_time = time.time()
             # If store_latest_only is True, only store the most recent bar
             if store_latest_only and bar_data:
                 bar_data = [bar_data[-1]]  # Keep only the last bar
                 
             await bars.store_bars(db, bar_data)
-            store_time = time.time() - store_start_time
-            print(f"Bar data stored successfully in {store_time:.2f} seconds")
-            print(f"Bar data processing ratio: {store_time/fetch_time:.2f}x slower than fetch")  # Debug print
         else:
             print(f"No bar data found (checked in {fetch_time:.2f} seconds)")
         
@@ -79,15 +72,11 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
         
         if daily_bar_data:
             print(f"Found {len(daily_bar_data)} daily bars (fetched in {daily_fetch_time:.2f} seconds)")
-            print("Storing daily bar data...")
-            store_start_time = time.time()
             # If store_latest_only is True, only store the most recent daily bar
             if store_latest_only and daily_bar_data:
                 daily_bar_data = [daily_bar_data[-1]]
                 
             await bars_daily.store_bars(db, daily_bar_data)
-            store_time = time.time() - store_start_time
-            print(f"Daily bar data stored successfully in {store_time:.2f} seconds")
         else:
             print(f"No daily bar data found (checked in {daily_fetch_time:.2f} seconds)")
         
@@ -99,19 +88,11 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
         
         if trade_data:
             print(f"Found {len(trade_data)} trades (fetched in {trade_fetch_time:.2f} seconds)")
-            print("Storing trade data...")
-            print(f"Sample trade data structure: {trade_data[0]}")  # Debug print
-            print(f"Timestamp type: {type(trade_data[0]['sip_timestamp'])}")  # Debug print
-            
-            store_start_time = time.time()
             # If store_latest_only is True, only store the most recent trade
             if store_latest_only and trade_data:
                 trade_data = [trade_data[-1]]
                 
             await trades.store_trades(db, trade_data)
-            store_time = time.time() - store_start_time
-            print(f"Trade data stored successfully in {store_time:.2f} seconds")
-            print(f"Trade data processing ratio: {store_time/trade_fetch_time:.2f}x slower than fetch")  # Debug print
         else:
             print(f"No trade data found (checked in {trade_fetch_time:.2f} seconds)")
         
@@ -123,19 +104,11 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
         
         if quote_data:
             print(f"Found {len(quote_data)} quotes (fetched in {quote_fetch_time:.2f} seconds)")
-            print("Storing quote data...")
-            print(f"Sample quote data structure: {quote_data[0]}")  # Debug print
-            print(f"Timestamp type: {type(quote_data[0]['sip_timestamp'])}")  # Debug print
-            
-            store_start_time = time.time()
             # If store_latest_only is True, only store the most recent quote
             if store_latest_only and quote_data:
                 quote_data = [quote_data[-1]]
                 
             await quotes.store_quotes(db, quote_data)
-            store_time = time.time() - store_start_time
-            print(f"Quote data stored successfully in {store_time:.2f} seconds")
-            print(f"Quote data processing ratio: {store_time/quote_fetch_time:.2f}x slower than fetch")  # Debug print
         else:
             print(f"No quote data found (checked in {quote_fetch_time:.2f} seconds)")
         
@@ -146,14 +119,11 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
         fetch_time = time.time() - start_time
         if news_data:
             print(f"Found {len(news_data)} news items (fetched in {fetch_time:.2f} seconds)")
-            print("Storing news data...")
-            start_time = time.time()
             # If store_latest_only is True, only store the most recent news
             if store_latest_only and news_data:
                 news_data = [news_data[-1]]
                 
             await news.store_news(db, news_data)
-            print(f"News data stored successfully in {time.time() - start_time:.2f} seconds")
         else:
             print(f"No news data found (checked in {fetch_time:.2f} seconds)")
         
@@ -164,8 +134,6 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
         fetch_time = time.time() - start_time
         if indicator_data:
             print(f"Found {len(indicator_data)} indicators (fetched in {fetch_time:.2f} seconds)")
-            print("Storing indicator data...")
-            start_time = time.time()
             # If store_latest_only is True, only store the most recent indicators
             if store_latest_only and indicator_data:
                 # Group by indicator type and keep latest for each
@@ -177,7 +145,6 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
                 indicator_data = list(latest_indicators.values())
                 
             await indicators.store_indicators(db, indicator_data)
-            print(f"Indicator data stored successfully in {time.time() - start_time:.2f} seconds")
         else:
             print(f"No indicator data found (checked in {fetch_time:.2f} seconds)")
             
@@ -195,7 +162,7 @@ async def main(tickers: List[str], from_date: datetime, to_date: datetime, store
         tickers: List of ticker symbols
         from_date: Start date
         to_date: End date
-        store_latest_only: Whether to only store the latest row per ticker
+        store_latest_only: Whether to only store the latest row per ticker (True for live mode, False for historical)
     """
     total_start_time = time.time()
     db = ClickHouseDB()
