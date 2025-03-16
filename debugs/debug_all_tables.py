@@ -288,13 +288,11 @@ def count_duplicates(db: ClickHouseDB, table_name: str) -> dict:
             else:
                 return {'table': table_name, 'error': f'No timestamp column found in {table_name}'}
 
-        # Get counts and timestamp range in a single query
+        # Get counts in a single query
         count_query = f"""
             SELECT 
                 count() as total,
-                count(DISTINCT {timestamp_col}) as unique_timestamps,
-                min({timestamp_col}) as earliest_timestamp,
-                max({timestamp_col}) as latest_timestamp
+                count(DISTINCT {timestamp_col}) as unique_timestamps
             FROM {db.database}.{table_name}
         """
         result = db.client.query(count_query)
@@ -304,8 +302,6 @@ def count_duplicates(db: ClickHouseDB, table_name: str) -> dict:
             
         total_rows = result.result_rows[0][0]
         unique_timestamps = result.result_rows[0][1]
-        earliest_timestamp = result.result_rows[0][2]
-        latest_timestamp = result.result_rows[0][3]
         duplicate_count = total_rows - unique_timestamps
         duplicate_percent = (duplicate_count / total_rows * 100) if total_rows > 0 else 0
         
@@ -315,9 +311,7 @@ def count_duplicates(db: ClickHouseDB, table_name: str) -> dict:
             'unique_timestamps': unique_timestamps,
             'duplicate_rows': duplicate_count,
             'duplicate_percent': duplicate_percent,
-            'timestamp_column': timestamp_col,
-            'earliest_timestamp': earliest_timestamp,
-            'latest_timestamp': latest_timestamp
+            'timestamp_column': timestamp_col
         }
         
     except Exception as e:
@@ -356,8 +350,6 @@ def analyze_all_tables():
             print(f"Duplicate Rows: {dup_info['duplicate_rows']:,}")
             print(f"Duplicate Percentage: {dup_info['duplicate_percent']:.2f}%")
             print(f"Using Timestamp Column: {dup_info['timestamp_column']}")
-            print(f"Earliest Timestamp: {dup_info['earliest_timestamp']}")
-            print(f"Latest Timestamp: {dup_info['latest_timestamp']}")
         
         print("-" * 30)
     
