@@ -2,6 +2,7 @@ import asyncio
 import time
 from datetime import datetime, timedelta
 from typing import List
+import pytz
 
 from endpoints.db import ClickHouseDB
 from endpoints import bars, trades, quotes, news, indicators, master, bars_daily
@@ -94,7 +95,20 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
         # Fetch and store trade data
         print(f"\nFetching trade data for {ticker}...")
         trade_start_time = time.time()
-        trade_data = await trades.fetch_trades(ticker, from_date, to_date)
+        
+        # Ensure dates are timezone-aware
+        et_tz = pytz.timezone('US/Eastern')
+        trade_from = from_date if from_date.tzinfo is not None else et_tz.localize(from_date)
+        trade_to = to_date if to_date.tzinfo is not None else et_tz.localize(to_date)
+        
+        # For live mode, adjust to last minute
+        if store_latest_only:
+            trade_from = datetime(trade_to.year, trade_to.month, trade_to.day, 
+                                trade_to.hour, trade_to.minute, 0, 
+                                tzinfo=trade_to.tzinfo)
+            trade_to = trade_from + timedelta(minutes=1)
+            
+        trade_data = await trades.fetch_trades(ticker, trade_from, trade_to)
         trade_fetch_time = time.time() - trade_start_time
         
         if trade_data:
@@ -104,10 +118,6 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
             print(f"Timestamp type: {type(trade_data[0]['sip_timestamp'])}")  # Debug print
             
             store_start_time = time.time()
-            # If store_latest_only is True, only store the most recent trade
-            if store_latest_only and trade_data:
-                trade_data = [trade_data[-1]]
-                
             await trades.store_trades(db, trade_data)
             store_time = time.time() - store_start_time
             print(f"Trade data stored successfully in {store_time:.2f} seconds")
@@ -118,7 +128,12 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
         # Fetch and store quote data
         print(f"\nFetching quote data for {ticker}...")
         quote_start_time = time.time()
-        quote_data = await quotes.fetch_quotes(ticker, from_date, to_date)
+        
+        # Use the same time range as trades
+        quote_from = trade_from
+        quote_to = trade_to
+            
+        quote_data = await quotes.fetch_quotes(ticker, quote_from, quote_to)
         quote_fetch_time = time.time() - quote_start_time
         
         if quote_data:
@@ -128,10 +143,6 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
             print(f"Timestamp type: {type(quote_data[0]['sip_timestamp'])}")  # Debug print
             
             store_start_time = time.time()
-            # If store_latest_only is True, only store the most recent quote
-            if store_latest_only and quote_data:
-                quote_data = [quote_data[-1]]
-                
             await quotes.store_quotes(db, quote_data)
             store_time = time.time() - store_start_time
             print(f"Quote data stored successfully in {store_time:.2f} seconds")

@@ -112,8 +112,21 @@ async def run_live_data() -> None:
                     await asyncio.sleep(60)
                     continue
                 
-                # Run data collection in live mode
-                run_data_collection(mode="live", store_latest_only=True)
+                # After waiting, calculate the previous minute's time range
+                now = datetime.now(et_tz)
+                last_minute_end = now.replace(second=0, microsecond=0) - timedelta(minutes=1)  # Previous minute end
+                last_minute_start = last_minute_end - timedelta(minutes=1)  # Previous minute start
+                
+                print(f"\nStarting live data processing at {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+                print(f"Processing data for {last_minute_start.strftime('%H:%M:00')} - {last_minute_end.strftime('%H:%M:00')} ET")
+                
+                # Run data collection in live mode with the previous minute's time range
+                await run_data_collection(
+                    mode="live", 
+                    store_latest_only=True,
+                    from_date=last_minute_start,
+                    to_date=last_minute_end
+                )
                     
             except Exception as e:
                 print(f"Error in processing cycle: {str(e)}")

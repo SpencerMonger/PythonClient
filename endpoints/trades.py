@@ -27,29 +27,53 @@ async def fetch_trades(ticker: str, from_date: datetime, to_date: datetime) -> L
     client = get_rest_client()
     trades = []
     
-    # Format dates as YYYY-MM-DD
-    from_str = from_date.strftime("%Y-%m-%d")
-    to_str = to_date.strftime("%Y-%m-%d")
-    
     try:
-        for trade in client.list_trades(
-            ticker=ticker,
-            timestamp_gte=from_str,
-            timestamp_lt=to_str,
-            limit=50000
-        ):
-            trades.append({
-                "ticker": ticker,
-                "sip_timestamp": trade.sip_timestamp,
-                "participant_timestamp": trade.participant_timestamp,
-                "trf_timestamp": trade.trf_timestamp,
-                "sequence_number": trade.sequence_number,
-                "price": float(trade.price) if trade.price is not None else None,
-                "size": int(trade.size) if trade.size is not None else None,
-                "conditions": trade.conditions or [],
-                "exchange": int(trade.exchange) if trade.exchange is not None else None,
-                "tape": int(trade.tape) if trade.tape is not None else None
-            })
+        # If the dates are timezone-aware (live mode), use nanosecond timestamps
+        if from_date.tzinfo is not None and to_date.tzinfo is not None:
+            from_ns = int(from_date.timestamp() * 1_000_000_000)
+            to_ns = int(to_date.timestamp() * 1_000_000_000)
+            print(f"Fetching trades for {ticker} from {from_date.strftime('%H:%M:00')} to {to_date.strftime('%H:%M:00')} ET...")
+            for trade in client.list_trades(
+                ticker=ticker,
+                timestamp_gte=from_ns,
+                timestamp_lt=to_ns,
+                limit=50000
+            ):
+                trades.append({
+                    "ticker": ticker,
+                    "sip_timestamp": trade.sip_timestamp,
+                    "participant_timestamp": trade.participant_timestamp,
+                    "trf_timestamp": trade.trf_timestamp,
+                    "sequence_number": trade.sequence_number,
+                    "price": float(trade.price) if trade.price is not None else None,
+                    "size": int(trade.size) if trade.size is not None else None,
+                    "conditions": trade.conditions or [],
+                    "exchange": int(trade.exchange) if trade.exchange is not None else None,
+                    "tape": int(trade.tape) if trade.tape is not None else None
+                })
+        else:
+            # For historical mode, use date strings
+            from_str = from_date.strftime("%Y-%m-%d")
+            to_str = to_date.strftime("%Y-%m-%d")
+            print(f"Fetching trades for {ticker} from {from_str} to {to_str}...")
+            for trade in client.list_trades(
+                ticker=ticker,
+                timestamp_gte=from_str,
+                timestamp_lt=to_str,
+                limit=50000
+            ):
+                trades.append({
+                    "ticker": ticker,
+                    "sip_timestamp": trade.sip_timestamp,
+                    "participant_timestamp": trade.participant_timestamp,
+                    "trf_timestamp": trade.trf_timestamp,
+                    "sequence_number": trade.sequence_number,
+                    "price": float(trade.price) if trade.price is not None else None,
+                    "size": int(trade.size) if trade.size is not None else None,
+                    "conditions": trade.conditions or [],
+                    "exchange": int(trade.exchange) if trade.exchange is not None else None,
+                    "tape": int(trade.tape) if trade.tape is not None else None
+                })
     except Exception as e:
         print(f"Error fetching trades for {ticker}: {str(e)}")
         return []

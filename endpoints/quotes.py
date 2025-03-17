@@ -31,33 +31,61 @@ async def fetch_quotes(ticker: str, from_date: datetime, to_date: datetime) -> L
     client = get_rest_client()
     quotes = []
     
-    # Format dates as YYYY-MM-DD
-    from_str = from_date.strftime("%Y-%m-%d")
-    to_str = to_date.strftime("%Y-%m-%d")
-    
     try:
-        for quote in client.list_quotes(
-            ticker=ticker,
-            timestamp_gte=from_str,
-            timestamp_lt=to_str,
-            limit=50000
-        ):
-            quotes.append({
-                "ticker": ticker,
-                "sip_timestamp": quote.sip_timestamp,
-                "ask_exchange": int(quote.ask_exchange) if quote.ask_exchange is not None else None,
-                "ask_price": float(quote.ask_price) if quote.ask_price is not None else None,
-                "ask_size": float(quote.ask_size) if quote.ask_size is not None else None,
-                "bid_exchange": int(quote.bid_exchange) if quote.bid_exchange is not None else None,
-                "bid_price": float(quote.bid_price) if quote.bid_price is not None else None,
-                "bid_size": float(quote.bid_size) if quote.bid_size is not None else None,
-                "conditions": quote.conditions or [],
-                "indicators": quote.indicators or [],
-                "participant_timestamp": quote.participant_timestamp,
-                "sequence_number": int(quote.sequence_number) if quote.sequence_number is not None else None,
-                "tape": int(quote.tape) if quote.tape is not None else None,
-                "trf_timestamp": quote.trf_timestamp
-            })
+        # If the dates are timezone-aware (live mode), use nanosecond timestamps
+        if from_date.tzinfo is not None and to_date.tzinfo is not None:
+            from_ns = int(from_date.timestamp() * 1_000_000_000)
+            to_ns = int(to_date.timestamp() * 1_000_000_000)
+            print(f"Fetching quotes for {ticker} from {from_date.strftime('%H:%M:00')} to {to_date.strftime('%H:%M:00')} ET...")
+            for quote in client.list_quotes(
+                ticker=ticker,
+                timestamp_gte=from_ns,
+                timestamp_lt=to_ns,
+                limit=50000
+            ):
+                quotes.append({
+                    "ticker": ticker,
+                    "sip_timestamp": quote.sip_timestamp,
+                    "ask_exchange": int(quote.ask_exchange) if quote.ask_exchange is not None else None,
+                    "ask_price": float(quote.ask_price) if quote.ask_price is not None else None,
+                    "ask_size": float(quote.ask_size) if quote.ask_size is not None else None,
+                    "bid_exchange": int(quote.bid_exchange) if quote.bid_exchange is not None else None,
+                    "bid_price": float(quote.bid_price) if quote.bid_price is not None else None,
+                    "bid_size": float(quote.bid_size) if quote.bid_size is not None else None,
+                    "conditions": quote.conditions or [],
+                    "indicators": quote.indicators or [],
+                    "participant_timestamp": quote.participant_timestamp,
+                    "sequence_number": int(quote.sequence_number) if quote.sequence_number is not None else None,
+                    "tape": int(quote.tape) if quote.tape is not None else None,
+                    "trf_timestamp": quote.trf_timestamp
+                })
+        else:
+            # For historical mode, use date strings
+            from_str = from_date.strftime("%Y-%m-%d")
+            to_str = to_date.strftime("%Y-%m-%d")
+            print(f"Fetching quotes for {ticker} from {from_str} to {to_str}...")
+            for quote in client.list_quotes(
+                ticker=ticker,
+                timestamp_gte=from_str,
+                timestamp_lt=to_str,
+                limit=50000
+            ):
+                quotes.append({
+                    "ticker": ticker,
+                    "sip_timestamp": quote.sip_timestamp,
+                    "ask_exchange": int(quote.ask_exchange) if quote.ask_exchange is not None else None,
+                    "ask_price": float(quote.ask_price) if quote.ask_price is not None else None,
+                    "ask_size": float(quote.ask_size) if quote.ask_size is not None else None,
+                    "bid_exchange": int(quote.bid_exchange) if quote.bid_exchange is not None else None,
+                    "bid_price": float(quote.bid_price) if quote.bid_price is not None else None,
+                    "bid_size": float(quote.bid_size) if quote.bid_size is not None else None,
+                    "conditions": quote.conditions or [],
+                    "indicators": quote.indicators or [],
+                    "participant_timestamp": quote.participant_timestamp,
+                    "sequence_number": int(quote.sequence_number) if quote.sequence_number is not None else None,
+                    "tape": int(quote.tape) if quote.tape is not None else None,
+                    "trf_timestamp": quote.trf_timestamp
+                })
     except Exception as e:
         print(f"Error fetching quotes for {ticker}: {str(e)}")
         return []
