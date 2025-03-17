@@ -168,8 +168,16 @@ def check_master_consistency(db: ClickHouseDB) -> None:
         SELECT 
             'Indicators' as check_type,
             count(*) as master_count,
-            (SELECT count(DISTINCT ticker || toString(timestamp)) FROM stock_indicators) as source_count,
-            abs(count(*) - (SELECT count(DISTINCT ticker || toString(timestamp)) FROM stock_indicators)) as difference
+            (SELECT count(*) FROM (
+                SELECT DISTINCT ticker, timestamp, indicator_type 
+                FROM stock_indicators
+            )) as source_count,
+            abs(count(*) - (
+                SELECT count(*) FROM (
+                    SELECT DISTINCT ticker, timestamp, indicator_type 
+                    FROM stock_indicators
+                )
+            )) as difference
         FROM stock_master
         WHERE sma_20 IS NOT NULL OR ema_20 IS NOT NULL OR macd_value IS NOT NULL OR rsi_14 IS NOT NULL
     """)
@@ -260,6 +268,7 @@ def get_table_info(db: ClickHouseDB, table_name: str) -> dict:
 def count_duplicates(db: ClickHouseDB, table_name: str) -> dict:
     """
     Count duplicate rows in a table based on timestamp only.
+    For stock_indicators table, count based on timestamp and indicator_type combination.
     """
     try:
         # Determine timestamp column based on table name
@@ -289,30 +298,50 @@ def count_duplicates(db: ClickHouseDB, table_name: str) -> dict:
                 return {'table': table_name, 'error': f'No timestamp column found in {table_name}'}
 
         # Get counts and timestamp range in a single query
-        count_query = f"""
-            SELECT 
-                count() as total,
-                count(DISTINCT {timestamp_col}) as unique_timestamps,
-                min({timestamp_col}) as earliest_timestamp,
-                max({timestamp_col}) as latest_timestamp
-            FROM {db.database}.{table_name}
-        """
+        if table_name == 'stock_indicators':
+            count_query = f"""
+                SELECT 
+                    count() as total,
+                    (
+                        SELECT count()
+                        FROM (
+                            SELECT DISTINCT {timestamp_col}, indicator_type
+                            FROM {db.database}.{table_name}
+                            SETTINGS 
+                                max_memory_usage = 80000000000,
+                                max_bytes_before_external_group_by = 20000000000,
+                                group_by_overflow_mode = 'any'
+                        )
+                    ) as unique_combinations,
+                    min({timestamp_col}) as earliest_timestamp,
+                    max({timestamp_col}) as latest_timestamp
+                FROM {db.database}.{table_name}
+            """
+        else:
+            count_query = f"""
+                SELECT 
+                    count() as total,
+                    count(DISTINCT {timestamp_col}) as unique_timestamps,
+                    min({timestamp_col}) as earliest_timestamp,
+                    max({timestamp_col}) as latest_timestamp
+                FROM {db.database}.{table_name}
+            """
         result = db.client.query(count_query)
         
         if not result.result_rows:
             return {'table': table_name, 'error': 'No results returned'}
             
         total_rows = result.result_rows[0][0]
-        unique_timestamps = result.result_rows[0][1]
+        unique_count = result.result_rows[0][1]
         earliest_timestamp = result.result_rows[0][2]
         latest_timestamp = result.result_rows[0][3]
-        duplicate_count = total_rows - unique_timestamps
+        duplicate_count = total_rows - unique_count
         duplicate_percent = (duplicate_count / total_rows * 100) if total_rows > 0 else 0
         
         return {
             'table': table_name,
             'total_rows': total_rows,
-            'unique_timestamps': unique_timestamps,
+            'unique_timestamps': unique_count,
             'duplicate_rows': duplicate_count,
             'duplicate_percent': duplicate_percent,
             'timestamp_column': timestamp_col,
@@ -442,18 +471,40 @@ def analyze_single_table_duplicates(db: ClickHouseDB, table_name: str, ticker_co
     total_rows = total_result[0]['total']
     print(f"Total rows: {total_rows:,}")
     
-    # Count unique combinations of ticker and timestamp
-    unique_query = f"""
-        SELECT count() as unique_count
-        FROM (
-            SELECT {ticker_col}, {timestamp_col}
-            FROM {db.database}.{table_name}
-            GROUP BY {ticker_col}, {timestamp_col}
-        )
-    """
+    # Count unique combinations based on table type
+    if table_name == 'stock_indicators':
+        unique_query = f"""
+            SELECT count() as unique_count
+            FROM (
+                SELECT {ticker_col}, {timestamp_col}, indicator_type
+                FROM {db.database}.{table_name}
+                GROUP BY {ticker_col}, {timestamp_col}, indicator_type
+                SETTINGS 
+                    max_memory_usage = 80000000000,
+                    max_bytes_before_external_group_by = 20000000000,
+                    group_by_overflow_mode = 'any'
+            )
+        """
+    else:
+        unique_query = f"""
+            SELECT count() as unique_count
+            FROM (
+                SELECT {ticker_col}, {timestamp_col}
+                FROM {db.database}.{table_name}
+                GROUP BY {ticker_col}, {timestamp_col}
+                SETTINGS 
+                    max_memory_usage = 80000000000,
+                    max_bytes_before_external_group_by = 20000000000,
+                    group_by_overflow_mode = 'any'
+            )
+        """
     unique_result = db.client.command(unique_query)
     unique_rows = unique_result[0]['unique_count']
-    print(f"Unique rows (by {ticker_col} and {timestamp_col}): {unique_rows:,}")
+    
+    if table_name == 'stock_indicators':
+        print(f"Unique rows (by {ticker_col}, {timestamp_col}, and indicator_type): {unique_rows:,}")
+    else:
+        print(f"Unique rows (by {ticker_col} and {timestamp_col}): {unique_rows:,}")
     
     # Calculate duplicates
     duplicate_count = total_rows - unique_rows
@@ -462,26 +513,56 @@ def analyze_single_table_duplicates(db: ClickHouseDB, table_name: str, ticker_co
     
     if duplicate_count > 0:
         # Find tickers with the most duplicates
-        dup_by_ticker_query = f"""
-            WITH counts AS (
+        if table_name == 'stock_indicators':
+            dup_by_ticker_query = f"""
+                WITH counts AS (
+                    SELECT 
+                        {ticker_col},
+                        count(*) as total,
+                        count(DISTINCT ({timestamp_col}, indicator_type)) as unique_times
+                    FROM {db.database}.{table_name}
+                    GROUP BY {ticker_col}
+                    SETTINGS 
+                        max_memory_usage = 80000000000,
+                        max_bytes_before_external_group_by = 20000000000,
+                        group_by_overflow_mode = 'any'
+                )
                 SELECT 
                     {ticker_col},
-                    count(*) as total,
-                    count(DISTINCT {timestamp_col}) as unique_times
-                FROM {db.database}.{table_name}
-                GROUP BY {ticker_col}
-            )
-            SELECT 
-                {ticker_col},
-                total,
-                unique_times,
-                total - unique_times as duplicates,
-                (total - unique_times) / total * 100 as duplicate_percent
-            FROM counts
-            WHERE total > unique_times
-            ORDER BY duplicates DESC
-            LIMIT 10
-        """
+                    total,
+                    unique_times,
+                    total - unique_times as duplicates,
+                    (total - unique_times) / total * 100 as duplicate_percent
+                FROM counts
+                WHERE total > unique_times
+                ORDER BY duplicates DESC
+                LIMIT 10
+            """
+        else:
+            dup_by_ticker_query = f"""
+                WITH counts AS (
+                    SELECT 
+                        {ticker_col},
+                        count(*) as total,
+                        count(DISTINCT {timestamp_col}) as unique_times
+                    FROM {db.database}.{table_name}
+                    GROUP BY {ticker_col}
+                    SETTINGS 
+                        max_memory_usage = 80000000000,
+                        max_bytes_before_external_group_by = 20000000000,
+                        group_by_overflow_mode = 'any'
+                )
+                SELECT 
+                    {ticker_col},
+                    total,
+                    unique_times,
+                    total - unique_times as duplicates,
+                    (total - unique_times) / total * 100 as duplicate_percent
+                FROM counts
+                WHERE total > unique_times
+                ORDER BY duplicates DESC
+                LIMIT 10
+            """
         
         try:
             dup_by_ticker = db.client.command(dup_by_ticker_query)
@@ -502,38 +583,79 @@ def analyze_single_table_duplicates(db: ClickHouseDB, table_name: str, ticker_co
             print(f"Error analyzing duplicates by ticker: {str(e)}")
         
         # Sample some duplicate rows
-        sample_query = f"""
-            WITH counts AS (
+        if table_name == 'stock_indicators':
+            sample_query = f"""
+                WITH counts AS (
+                    SELECT 
+                        {ticker_col},
+                        {timestamp_col},
+                        indicator_type,
+                        count(*) as cnt
+                    FROM {db.database}.{table_name}
+                    GROUP BY {ticker_col}, {timestamp_col}, indicator_type
+                    SETTINGS 
+                        max_memory_usage = 80000000000,
+                        max_bytes_before_external_group_by = 20000000000,
+                        group_by_overflow_mode = 'any'
+                )
                 SELECT 
-                    {ticker_col},
-                    {timestamp_col},
-                    count(*) as cnt
-                FROM {db.database}.{table_name}
-                GROUP BY {ticker_col}, {timestamp_col}
-            )
-            SELECT 
-                c.{ticker_col},
-                c.{timestamp_col},
-                c.cnt as duplicate_count
-            FROM counts c
-            WHERE c.cnt > 1
-            ORDER BY c.cnt DESC
-            LIMIT 5
-        """
+                    c.{ticker_col},
+                    c.{timestamp_col},
+                    c.indicator_type,
+                    c.cnt as duplicate_count
+                FROM counts c
+                WHERE c.cnt > 1
+                ORDER BY c.cnt DESC
+                LIMIT 5
+            """
+        else:
+            sample_query = f"""
+                WITH counts AS (
+                    SELECT 
+                        {ticker_col},
+                        {timestamp_col},
+                        count(*) as cnt
+                    FROM {db.database}.{table_name}
+                    GROUP BY {ticker_col}, {timestamp_col}
+                    SETTINGS 
+                        max_memory_usage = 80000000000,
+                        max_bytes_before_external_group_by = 20000000000,
+                        group_by_overflow_mode = 'any'
+                )
+                SELECT 
+                    c.{ticker_col},
+                    c.{timestamp_col},
+                    c.cnt as duplicate_count
+                FROM counts c
+                WHERE c.cnt > 1
+                ORDER BY c.cnt DESC
+                LIMIT 5
+            """
         
         try:
             sample_dups = db.client.command(sample_query)
             
             if sample_dups:
                 print("\nSample duplicate entries:")
-                print(f"{'Ticker':<10} {'Timestamp':<25} {'Count':<10}")
-                print("-" * 50)
-                
-                for row in sample_dups:
-                    ticker = row[ticker_col]
-                    ts = row[timestamp_col]
-                    cnt = row['duplicate_count']
-                    print(f"{ticker:<10} {str(ts):<25} {cnt:<10}")
+                if table_name == 'stock_indicators':
+                    print(f"{'Ticker':<10} {'Timestamp':<25} {'Type':<15} {'Count':<10}")
+                    print("-" * 60)
+                    
+                    for row in sample_dups:
+                        ticker = row[ticker_col]
+                        ts = row[timestamp_col]
+                        ind_type = row['indicator_type']
+                        cnt = row['duplicate_count']
+                        print(f"{ticker:<10} {str(ts):<25} {ind_type:<15} {cnt:<10}")
+                else:
+                    print(f"{'Ticker':<10} {'Timestamp':<25} {'Count':<10}")
+                    print("-" * 50)
+                    
+                    for row in sample_dups:
+                        ticker = row[ticker_col]
+                        ts = row[timestamp_col]
+                        cnt = row['duplicate_count']
+                        print(f"{ticker:<10} {str(ts):<25} {cnt:<10}")
         except Exception as e:
             print(f"Error getting sample duplicates: {str(e)}")
 

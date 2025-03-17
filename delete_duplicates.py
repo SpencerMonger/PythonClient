@@ -1,9 +1,15 @@
 from endpoints.db import ClickHouseDB
 import argparse
+from datetime import datetime, timedelta
+from endpoints import config
+from endpoints.master import init_master_table
+import asyncio
 
 def delete_duplicates(db: ClickHouseDB, table_name: str, dry_run: bool = True) -> dict:
     """
-    Delete duplicate rows from a table, keeping only one row per timestamp.
+    Delete duplicate rows from a table, keeping only one row per unique combination:
+    - For stock_indicators: unique by (ticker, timestamp, indicator_type)
+    - For all other tables: unique by (ticker, timestamp)
     """
     try:
         # Determine timestamp column based on table name
@@ -32,27 +38,49 @@ def delete_duplicates(db: ClickHouseDB, table_name: str, dry_run: bool = True) -
             else:
                 return {'table': table_name, 'error': f'No timestamp column found in {table_name}'}
 
-        # Get counts before deletion with rounded timestamps
-        count_query = f"""
-            SELECT 
-                count() as total,
-                count(DISTINCT toDateTime64(toUnixTimestamp64Nano({timestamp_col}), 3)) as unique_timestamps
-            FROM {db.database}.{table_name}
-        """
+        # First get just the total count which is very fast
+        count_query = f"SELECT count() FROM {db.database}.{table_name}"
         result = db.client.query(count_query)
-        
-        if not result.result_rows:
-            return {'table': table_name, 'error': 'No results returned'}
-            
         total_rows = result.result_rows[0][0]
-        unique_timestamps = result.result_rows[0][1]
-        duplicate_rows = total_rows - unique_timestamps
 
-        if duplicate_rows == 0:
+        # Then get unique count based on table type
+        if table_name == 'stock_indicators':
+            # For indicators table, count unique combinations of ticker, timestamp and indicator_type
+            unique_query = f"""
+                SELECT count()
+                FROM (
+                    SELECT ticker, {timestamp_col}, indicator_type
+                    FROM {db.database}.{table_name}
+                    GROUP BY ticker, {timestamp_col}, indicator_type
+                    SETTINGS 
+                        max_memory_usage = 80000000000,
+                        max_bytes_before_external_group_by = 20000000000,
+                        group_by_overflow_mode = 'any'
+                )
+            """
+        else:
+            # For other tables, count unique combinations of ticker and timestamp
+            unique_query = f"""
+                SELECT count()
+                FROM (
+                    SELECT ticker, {timestamp_col}
+                    FROM {db.database}.{table_name}
+                    GROUP BY ticker, {timestamp_col}
+                    SETTINGS 
+                        max_memory_usage = 80000000000,
+                        max_bytes_before_external_group_by = 20000000000,
+                        group_by_overflow_mode = 'any'
+                )
+            """
+        result = db.client.query(unique_query)
+        unique_combinations = result.result_rows[0][0]
+        duplicate_count = total_rows - unique_combinations
+        
+        if duplicate_count == 0:
             return {
                 'table': table_name,
                 'total_rows': total_rows,
-                'unique_timestamps': unique_timestamps,
+                'unique_combinations': unique_combinations,
                 'duplicate_rows': 0,
                 'message': 'No duplicates found'
             }
@@ -61,45 +89,104 @@ def delete_duplicates(db: ClickHouseDB, table_name: str, dry_run: bool = True) -
             return {
                 'table': table_name,
                 'total_rows': total_rows,
-                'unique_timestamps': unique_timestamps,
-                'duplicate_rows': duplicate_rows,
-                'message': f'Would delete {duplicate_rows:,} duplicate rows'
+                'unique_combinations': unique_combinations,
+                'duplicate_rows': duplicate_count,
+                'message': f'Would delete {duplicate_count:,} duplicate rows'
             }
         
-        # Execute the delete with rounded timestamps
-        delete_query = f"""
-        ALTER TABLE {db.database}.{table_name} DELETE WHERE
-        (
-            toDateTime64(toUnixTimestamp64Nano({timestamp_col}), 3),
-            rowNumberInAllBlocks()
-        ) IN 
-        (
-            SELECT 
-                toDateTime64(toUnixTimestamp64Nano({timestamp_col}), 3),
-                rowNumberInAllBlocks()
-            FROM {db.database}.{table_name}
-            WHERE (
-                toDateTime64(toUnixTimestamp64Nano({timestamp_col}), 3),
-                rowNumberInAllBlocks()
-            ) NOT IN (
-                SELECT 
-                    toDateTime64(toUnixTimestamp64Nano({timestamp_col}), 3),
-                    min(rowNumberInAllBlocks())
-                FROM {db.database}.{table_name}
-                GROUP BY toDateTime64(toUnixTimestamp64Nano({timestamp_col}), 3)
-            )
-        )
-        """
-        db.client.command(delete_query)
+        # Store initial counts before deletion
+        initial_total = total_rows
+        expected_after = unique_combinations
+        
+        # Get list of tickers to process in chunks
+        tickers_query = f"SELECT DISTINCT ticker FROM {db.database}.{table_name}"
+        result = db.client.query(tickers_query)
+        tickers = [row[0] for row in result.result_rows]
+        
+        # Process each ticker separately to reduce memory usage
+        total_deleted = 0
+        for ticker in tickers:
+            if table_name == 'stock_indicators':
+                # For indicators table, keep one row per ticker + timestamp + indicator_type combination
+                delete_query = f"""
+                DELETE FROM {db.database}.{table_name} 
+                WHERE ticker = '{ticker}'
+                AND ({timestamp_col}, indicator_type) NOT IN (
+                    SELECT
+                        {timestamp_col},
+                        indicator_type
+                    FROM (
+                        SELECT
+                            {timestamp_col},
+                            indicator_type,
+                            argMin(rowNumberInAllBlocks(), {timestamp_col}) as min_row
+                        FROM {db.database}.{table_name}
+                        WHERE ticker = '{ticker}'
+                        GROUP BY {timestamp_col}, indicator_type
+                    )
+                )
+                SETTINGS 
+                    max_memory_usage = 80000000000,
+                    max_bytes_before_external_group_by = 20000000000,
+                    group_by_overflow_mode = 'any'
+                """
+            else:
+                # For other tables, keep one row per ticker + timestamp combination
+                delete_query = f"""
+                DELETE FROM {db.database}.{table_name} 
+                WHERE ticker = '{ticker}'
+                AND {timestamp_col} NOT IN (
+                    SELECT {timestamp_col}
+                    FROM (
+                        SELECT
+                            {timestamp_col},
+                            argMin(rowNumberInAllBlocks(), {timestamp_col}) as min_row
+                        FROM {db.database}.{table_name}
+                        WHERE ticker = '{ticker}'
+                        GROUP BY {timestamp_col}
+                    )
+                )
+                SETTINGS 
+                    max_memory_usage = 80000000000,
+                    max_bytes_before_external_group_by = 20000000000,
+                    group_by_overflow_mode = 'any'
+                """
+            db.client.command(delete_query)
         
         # Get count after deletion
         result = db.client.query(f"SELECT count() FROM {db.database}.{table_name}")
         rows_after = result.result_rows[0][0]
-        rows_deleted = total_rows - rows_after
+        rows_deleted = initial_total - rows_after
+        
+        # Drop and reinitialize master tables if any rows were deleted
+        if rows_deleted > 0:
+            print("\nReinitializing master tables...")
+            
+            # Drop master tables
+            print("Dropping stock_normalized_mv materialized view...")
+            db.client.command(f"DROP TABLE IF EXISTS {db.database}.stock_normalized_mv")
+            print("Normalized materialized view dropped successfully")
+            
+            print("\nDropping stock_normalized table...")
+            db.client.command(f"DROP TABLE IF EXISTS {db.database}.stock_normalized")
+            print("Normalized table dropped successfully")
+            
+            print("\nDropping stock_master_mv materialized view...")
+            db.client.command(f"DROP TABLE IF EXISTS {db.database}.stock_master_mv")
+            print("Master materialized view dropped successfully")
+            
+            print("\nDropping stock_master table...")
+            db.client.command(f"DROP TABLE IF EXISTS {db.database}.{config.TABLE_STOCK_MASTER}")
+            print("Master table dropped successfully")
+            
+            # Initialize master tables
+            print("\nInitializing master tables...")
+            asyncio.run(init_master_table(db))
+            print("Master tables initialized successfully")
         
         return {
             'table': table_name,
-            'total_rows': total_rows,
+            'total_rows': initial_total,
             'rows_after': rows_after,
             'duplicate_rows': rows_deleted,
             'message': f'Successfully deleted {rows_deleted:,} duplicate rows'
@@ -143,7 +230,7 @@ def main():
         else:
             print(f"Total Rows: {result['total_rows']:,}")
             print(f"Duplicate Rows: {result['duplicate_rows']:,}")
-            remaining = result['total_rows'] - result['duplicate_rows']
+            remaining = result['rows_after'] if 'rows_after' in result else (result['total_rows'] - result['duplicate_rows'])
             print(f"Remaining Rows: {remaining:,}")
             if 'rows_after' in result:
                 print(f"Rows After: {result['rows_after']:,}")

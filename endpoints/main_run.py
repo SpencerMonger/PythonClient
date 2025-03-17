@@ -77,8 +77,8 @@ if __name__ == "__main__":
     if args.mode == "historical":
         if not args.from_date or not args.to_date:
             # Use default dates if not provided
-            from_date = datetime(2025, 3, 4)
-            to_date = datetime(2025, 3, 5)
+            from_date = datetime(2025, 3, 1)
+            to_date = datetime(2025, 3, 14)
         else:
             from_date = args.from_date
             to_date = args.to_date
