@@ -47,6 +47,8 @@ TABLE_STOCK_NEWS = "stock_news"
 TABLE_STOCK_INDICATORS = "stock_indicators"
 TABLE_STOCK_MASTER = "stock_master"  # New master table that combines all tables
 TABLE_STOCK_DAILY = "stock_daily"
+TABLE_STOCK_NORMALIZED = "stock_normalized"  # Table containing normalized data
+TABLE_STOCK_PREDICTIONS = "stock_predictions"  # Table for model predictions
 
 # Technical indicator settings
 SMA_WINDOWS = [5, 9, 12, 20, 50, 100, 200]

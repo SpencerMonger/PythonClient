@@ -5,3 +5,5 @@ python-dotenv>=1.0.0
 asyncio>=3.4.3
 pandas>=2.0.0
 pyarrow>=14.0.1
+scikit-learn>=1.0.2
+numpy>=1.21.0

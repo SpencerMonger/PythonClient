@@ -7,6 +7,7 @@ import pytz
 from endpoints.db import ClickHouseDB
 from endpoints import config
 from endpoints.main_run import run_data_collection, tickers
+from endpoints.model_feed import run_model_feed
 
 def is_market_open() -> bool:
     """
@@ -127,6 +128,10 @@ async def run_live_data() -> None:
                     from_date=last_minute_start,
                     to_date=last_minute_end
                 )
+                
+                # Run model feed after data collection
+                print("\nTriggering model predictions...")
+                await run_model_feed()
                     
             except Exception as e:
                 print(f"Error in processing cycle: {str(e)}")
