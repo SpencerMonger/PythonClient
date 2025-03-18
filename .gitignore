@@ -94,5 +94,8 @@ polygon/
 test_rest/
 test_websocket/
 
-#Models
+# Model files
 saved_models/
+*.pkl
+*.model
+random_forest_stock_prediction_model.pkl
