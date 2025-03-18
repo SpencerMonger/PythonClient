@@ -94,3 +94,5 @@ polygon/
 test_rest/
 test_websocket/
 
+#Models
+saved_models/
