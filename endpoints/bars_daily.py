@@ -60,12 +60,56 @@ async def fetch_bars(ticker: str, from_date: datetime, to_date: datetime) -> Lis
         
     return bars
 
-async def store_bars(db: ClickHouseDB, bars: List[Dict]) -> None:
+async def store_bars(db: ClickHouseDB, bars: List[Dict], mode: str = "historical") -> None:
     """
-    Store bar data in ClickHouse
+    Store bar data in ClickHouse, avoiding duplicates for daily data in live mode only
+    
+    Args:
+        db: Database connection
+        bars: List of bar data to store
+        mode: Either "historical" or "live". Duplicate checking only happens in live mode.
     """
     try:
-        await db.insert_data(config.TABLE_STOCK_DAILY, bars)
+        if not bars:
+            return
+            
+        if mode == "live":
+            # For live mode, check for duplicates
+            filtered_bars = []
+            for bar in bars:
+                # Format the timestamp for the query
+                check_date = bar['timestamp'].strftime('%Y-%m-%d')
+                
+                # Query to check if we already have data for this ticker and date
+                query = f"""
+                    SELECT 1
+                    FROM {db.database}.{config.TABLE_STOCK_DAILY}
+                    WHERE ticker = '{bar['ticker']}'
+                    AND toDate(timestamp) = toDate('{check_date}')
+                    LIMIT 1
+                """
+                
+                try:
+                    result = db.client.command(query)
+                    if not result:  # No existing data found for this ticker and date
+                        filtered_bars.append(bar)
+                    else:
+                        print(f"Skipping existing daily bar for {bar['ticker']} on {check_date}")
+                except Exception as e:
+                    print(f"Error checking for existing data: {str(e)}")
+                    # If there's an error checking, assume we should insert the data
+                    filtered_bars.append(bar)
+            
+            if filtered_bars:
+                await db.insert_data(config.TABLE_STOCK_DAILY, filtered_bars)
+                print(f"Stored {len(filtered_bars)} new daily bars (filtered out {len(bars) - len(filtered_bars)} existing bars)")
+            else:
+                print("No new daily bars to store (all bars already exist)")
+        else:
+            # For historical mode, store all bars without checking
+            await db.insert_data(config.TABLE_STOCK_DAILY, bars)
+            print(f"Stored {len(bars)} daily bars in historical mode")
+            
     except Exception as e:
         print(f"Error storing bars: {str(e)}")
 

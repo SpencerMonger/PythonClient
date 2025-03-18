@@ -86,9 +86,8 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
             if store_latest_only and daily_bar_data:
                 daily_bar_data = [daily_bar_data[-1]]
                 
-            await bars_daily.store_bars(db, daily_bar_data)
-            store_time = time.time() - store_start_time
-            print(f"Daily bar data stored successfully in {store_time:.2f} seconds")
+            await bars_daily.store_bars(db, daily_bar_data, "live" if store_latest_only else "historical")
+            print(f"Daily bar data stored successfully in {time.time() - store_start_time:.2f} seconds")
         else:
             print(f"No daily bar data found (checked in {daily_fetch_time:.2f} seconds)")
         
@@ -132,23 +131,49 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
         # Use the same time range as trades
         quote_from = trade_from
         quote_to = trade_to
-            
-        quote_data = await quotes.fetch_quotes(ticker, quote_from, quote_to)
-        quote_fetch_time = time.time() - quote_start_time
         
-        if quote_data:
-            print(f"Found {len(quote_data)} quotes (fetched in {quote_fetch_time:.2f} seconds)")
-            print("Storing quote data...")
-            print(f"Sample quote data structure: {quote_data[0]}")  # Debug print
-            print(f"Timestamp type: {type(quote_data[0]['sip_timestamp'])}")  # Debug print
+        try:
+            # Process quotes in smaller time chunks to avoid memory issues
+            chunk_size = timedelta(days=1)  # Process 24 hours at a time
+            current_from = quote_from
+            total_quotes = 0
+            first_chunk = True  # Flag to print sample data only for first chunk
             
-            store_start_time = time.time()
-            await quotes.store_quotes(db, quote_data)
-            store_time = time.time() - store_start_time
-            print(f"Quote data stored successfully in {store_time:.2f} seconds")
-            print(f"Quote data processing ratio: {store_time/quote_fetch_time:.2f}x slower than fetch")  # Debug print
-        else:
-            print(f"No quote data found (checked in {quote_fetch_time:.2f} seconds)")
+            while current_from < quote_to:
+                current_to = min(current_from + chunk_size, quote_to)
+                print(f"Fetching quotes for {ticker} from {current_from.strftime('%H:%M:%S')} to {current_to.strftime('%H:%M:%S')} ET...")
+                
+                chunk_start_time = time.time()
+                chunk_quotes = await quotes.fetch_quotes(ticker, current_from, current_to)
+                chunk_fetch_time = time.time() - chunk_start_time
+                
+                if chunk_quotes:
+                    total_quotes += len(chunk_quotes)
+                    print(f"Found {len(chunk_quotes)} quotes in current chunk (fetched in {chunk_fetch_time:.2f} seconds)")
+                    print("Storing quote chunk...")
+                    
+                    if first_chunk:
+                        print(f"Sample quote data structure: {chunk_quotes[0]}")  # Debug print
+                        print(f"Timestamp type: {type(chunk_quotes[0]['sip_timestamp'])}")  # Debug print
+                        first_chunk = False
+                    
+                    store_start_time = time.time()
+                    await quotes.store_quotes(db, chunk_quotes)
+                    store_time = time.time() - store_start_time
+                    print(f"Quote chunk stored successfully in {store_time:.2f} seconds")
+                    print(f"Quote chunk processing ratio: {store_time/chunk_fetch_time:.2f}x slower than fetch")  # Debug print
+                
+                current_from = current_to
+            
+            quote_fetch_time = time.time() - quote_start_time
+            if total_quotes > 0:
+                print(f"Successfully processed {total_quotes} total quotes in {quote_fetch_time:.2f} seconds")
+            else:
+                print(f"No quote data found (checked in {quote_fetch_time:.2f} seconds)")
+                
+        except Exception as e:
+            print(f"Error fetching quotes for {ticker}: {str(e)}")
+            print(f"No quote data found (checked in {time.time() - quote_start_time:.2f} seconds)")
         
         # Fetch and store news data
         print(f"\nFetching news data for {ticker}...")

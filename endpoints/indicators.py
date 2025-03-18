@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 from endpoints.polygon_client import get_rest_client
@@ -32,33 +32,50 @@ async def fetch_sma(ticker: str, window: int, from_date: datetime, to_date: date
         # Format dates as YYYY-MM-DD
         from_str = from_date.strftime("%Y-%m-%d")
         to_str = to_date.strftime("%Y-%m-%d")
+        current_from = from_date
         
-        sma = client.get_sma(
-            ticker=ticker,
-            timespan="minute",
-            adjusted=True,
-            window=window,
-            series_type="close",
-            timestamp_gte=from_str,
-            timestamp_lte=to_str,
-            order="asc",
-            limit=5000  # Polygon's maximum limit
-        )
-        
-        for value in sma.values:
-            # Convert timestamp from milliseconds to datetime
-            timestamp = datetime.fromtimestamp(value.timestamp / 1000.0)
-            indicators.append({
-                "ticker": ticker,
-                "timestamp": timestamp,
-                "indicator_type": f"SMA_{window}",
-                "window": window,
-                "value": float(value.value) if value.value is not None else 0.0,
-                "signal": None,
-                "histogram": None
-            })
+        while current_from < to_date:
+            # Calculate the next date range
+            current_to = min(current_from + timedelta(days=1), to_date)
+            current_from_str = current_from.strftime("%Y-%m-%d")
+            current_to_str = current_to.strftime("%Y-%m-%d")
+            
+            try:
+                sma = client.get_sma(
+                    ticker=ticker,
+                    timespan="minute",
+                    adjusted=True,
+                    window=window,
+                    series_type="close",
+                    timestamp_gte=current_from_str,
+                    timestamp_lte=current_to_str,
+                    order="asc",
+                    limit=5000  # Polygon's maximum limit
+                )
+                
+                for value in sma.values:
+                    # Convert timestamp from milliseconds to datetime
+                    timestamp = datetime.fromtimestamp(value.timestamp / 1000.0)
+                    indicators.append({
+                        "ticker": ticker,
+                        "timestamp": timestamp,
+                        "indicator_type": f"SMA_{window}",
+                        "window": window,
+                        "value": float(value.value) if value.value is not None else 0.0,
+                        "signal": None,
+                        "histogram": None
+                    })
+                
+                print(f"Fetched {len(sma.values)} SMA_{window} values for {current_from_str}")
+                
+            except Exception as e:
+                print(f"Error fetching SMA_{window} for {ticker} on {current_from_str}: {str(e)}")
+            
+            # Move to next day
+            current_from = current_to
+            
     except Exception as e:
-        print(f"Error fetching SMA_{window} for {ticker}: {str(e)}")
+        print(f"Error in SMA_{window} pagination for {ticker}: {str(e)}")
         return []
         
     return indicators
@@ -74,33 +91,50 @@ async def fetch_ema(ticker: str, window: int, from_date: datetime, to_date: date
         # Format dates as YYYY-MM-DD
         from_str = from_date.strftime("%Y-%m-%d")
         to_str = to_date.strftime("%Y-%m-%d")
+        current_from = from_date
         
-        ema = client.get_ema(
-            ticker=ticker,
-            timespan="minute",
-            adjusted=True,
-            window=window,
-            series_type="close",
-            timestamp_gte=from_str,
-            timestamp_lte=to_str,
-            order="asc",
-            limit=5000  # Polygon's maximum limit
-        )
-        
-        for value in ema.values:
-            # Convert timestamp from milliseconds to datetime
-            timestamp = datetime.fromtimestamp(value.timestamp / 1000.0)
-            indicators.append({
-                "ticker": ticker,
-                "timestamp": timestamp,
-                "indicator_type": f"EMA_{window}",
-                "window": window,
-                "value": float(value.value) if value.value is not None else 0.0,
-                "signal": None,
-                "histogram": None
-            })
+        while current_from < to_date:
+            # Calculate the next date range
+            current_to = min(current_from + timedelta(days=1), to_date)
+            current_from_str = current_from.strftime("%Y-%m-%d")
+            current_to_str = current_to.strftime("%Y-%m-%d")
+            
+            try:
+                ema = client.get_ema(
+                    ticker=ticker,
+                    timespan="minute",
+                    adjusted=True,
+                    window=window,
+                    series_type="close",
+                    timestamp_gte=current_from_str,
+                    timestamp_lte=current_to_str,
+                    order="asc",
+                    limit=5000  # Polygon's maximum limit
+                )
+                
+                for value in ema.values:
+                    # Convert timestamp from milliseconds to datetime
+                    timestamp = datetime.fromtimestamp(value.timestamp / 1000.0)
+                    indicators.append({
+                        "ticker": ticker,
+                        "timestamp": timestamp,
+                        "indicator_type": f"EMA_{window}",
+                        "window": window,
+                        "value": float(value.value) if value.value is not None else 0.0,
+                        "signal": None,
+                        "histogram": None
+                    })
+                
+                print(f"Fetched {len(ema.values)} EMA_{window} values for {current_from_str}")
+                
+            except Exception as e:
+                print(f"Error fetching EMA_{window} for {ticker} on {current_from_str}: {str(e)}")
+            
+            # Move to next day
+            current_from = current_to
+            
     except Exception as e:
-        print(f"Error fetching EMA_{window} for {ticker}: {str(e)}")
+        print(f"Error in EMA_{window} pagination for {ticker}: {str(e)}")
         return []
         
     return indicators
@@ -116,35 +150,52 @@ async def fetch_macd(ticker: str, from_date: datetime, to_date: datetime) -> Lis
         # Format dates as YYYY-MM-DD
         from_str = from_date.strftime("%Y-%m-%d")
         to_str = to_date.strftime("%Y-%m-%d")
+        current_from = from_date
         
-        macd = client.get_macd(
-            ticker=ticker,
-            timespan="minute",
-            adjusted=True,
-            short_window=12,  # Standard MACD parameters
-            long_window=26,
-            signal_window=9,
-            series_type="close",
-            timestamp_gte=from_str,
-            timestamp_lte=to_str,
-            order="asc",
-            limit=5000  # Polygon's maximum limit
-        )
-        
-        for value in macd.values:
-            # Convert timestamp from milliseconds to datetime
-            timestamp = datetime.fromtimestamp(value.timestamp / 1000.0)
-            indicators.append({
-                "ticker": ticker,
-                "timestamp": timestamp,
-                "indicator_type": "MACD",
-                "window": 0,  # Not applicable for MACD
-                "value": float(value.value) if value.value is not None else 0.0,
-                "signal": float(value.signal) if value.signal is not None else 0.0,
-                "histogram": float(value.histogram) if value.histogram is not None else 0.0
-            })
+        while current_from < to_date:
+            # Calculate the next date range
+            current_to = min(current_from + timedelta(days=1), to_date)
+            current_from_str = current_from.strftime("%Y-%m-%d")
+            current_to_str = current_to.strftime("%Y-%m-%d")
+            
+            try:
+                macd = client.get_macd(
+                    ticker=ticker,
+                    timespan="minute",
+                    adjusted=True,
+                    short_window=12,  # Standard MACD parameters
+                    long_window=26,
+                    signal_window=9,
+                    series_type="close",
+                    timestamp_gte=current_from_str,
+                    timestamp_lte=current_to_str,
+                    order="asc",
+                    limit=5000  # Polygon's maximum limit
+                )
+                
+                for value in macd.values:
+                    # Convert timestamp from milliseconds to datetime
+                    timestamp = datetime.fromtimestamp(value.timestamp / 1000.0)
+                    indicators.append({
+                        "ticker": ticker,
+                        "timestamp": timestamp,
+                        "indicator_type": "MACD",
+                        "window": 0,  # Not applicable for MACD
+                        "value": float(value.value) if value.value is not None else 0.0,
+                        "signal": float(value.signal) if value.signal is not None else 0.0,
+                        "histogram": float(value.histogram) if value.histogram is not None else 0.0
+                    })
+                
+                print(f"Fetched {len(macd.values)} MACD values for {current_from_str}")
+                
+            except Exception as e:
+                print(f"Error fetching MACD for {ticker} on {current_from_str}: {str(e)}")
+            
+            # Move to next day
+            current_from = current_to
+            
     except Exception as e:
-        print(f"Error fetching MACD for {ticker}: {str(e)}")
+        print(f"Error in MACD pagination for {ticker}: {str(e)}")
         return []
         
     return indicators
@@ -160,33 +211,50 @@ async def fetch_rsi(ticker: str, from_date: datetime, to_date: datetime) -> List
         # Format dates as YYYY-MM-DD
         from_str = from_date.strftime("%Y-%m-%d")
         to_str = to_date.strftime("%Y-%m-%d")
+        current_from = from_date
         
-        rsi = client.get_rsi(
-            ticker=ticker,
-            timespan="minute",
-            adjusted=True,
-            window=14,  # Standard RSI window
-            series_type="close",
-            timestamp_gte=from_str,
-            timestamp_lte=to_str,
-            order="asc",
-            limit=5000  # Polygon's maximum limit
-        )
-        
-        for value in rsi.values:
-            # Convert timestamp from milliseconds to datetime
-            timestamp = datetime.fromtimestamp(value.timestamp / 1000.0)
-            indicators.append({
-                "ticker": ticker,
-                "timestamp": timestamp,
-                "indicator_type": "RSI",
-                "window": 14,
-                "value": float(value.value) if value.value is not None else 0.0,
-                "signal": None,
-                "histogram": None
-            })
+        while current_from < to_date:
+            # Calculate the next date range
+            current_to = min(current_from + timedelta(days=1), to_date)
+            current_from_str = current_from.strftime("%Y-%m-%d")
+            current_to_str = current_to.strftime("%Y-%m-%d")
+            
+            try:
+                rsi = client.get_rsi(
+                    ticker=ticker,
+                    timespan="minute",
+                    adjusted=True,
+                    window=14,  # Standard RSI window
+                    series_type="close",
+                    timestamp_gte=current_from_str,
+                    timestamp_lte=current_to_str,
+                    order="asc",
+                    limit=5000  # Polygon's maximum limit
+                )
+                
+                for value in rsi.values:
+                    # Convert timestamp from milliseconds to datetime
+                    timestamp = datetime.fromtimestamp(value.timestamp / 1000.0)
+                    indicators.append({
+                        "ticker": ticker,
+                        "timestamp": timestamp,
+                        "indicator_type": "RSI",
+                        "window": 14,
+                        "value": float(value.value) if value.value is not None else 0.0,
+                        "signal": None,
+                        "histogram": None
+                    })
+                
+                print(f"Fetched {len(rsi.values)} RSI values for {current_from_str}")
+                
+            except Exception as e:
+                print(f"Error fetching RSI for {ticker} on {current_from_str}: {str(e)}")
+            
+            # Move to next day
+            current_from = current_to
+            
     except Exception as e:
-        print(f"Error fetching RSI for {ticker}: {str(e)}")
+        print(f"Error in RSI pagination for {ticker}: {str(e)}")
         return []
         
     return indicators

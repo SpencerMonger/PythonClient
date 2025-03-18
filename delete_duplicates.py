@@ -109,47 +109,31 @@ def delete_duplicates(db: ClickHouseDB, table_name: str, dry_run: bool = True) -
             if table_name == 'stock_indicators':
                 # For indicators table, keep one row per ticker + timestamp + indicator_type combination
                 delete_query = f"""
-                DELETE FROM {db.database}.{table_name} 
-                WHERE ticker = '{ticker}'
+                ALTER TABLE {db.database}.{table_name}
+                DELETE WHERE ticker = '{ticker}'
                 AND ({timestamp_col}, indicator_type) NOT IN (
-                    SELECT
-                        {timestamp_col},
+                    SELECT 
+                        MIN({timestamp_col}),
                         indicator_type
-                    FROM (
-                        SELECT
-                            {timestamp_col},
-                            indicator_type,
-                            argMin(rowNumberInAllBlocks(), {timestamp_col}) as min_row
-                        FROM {db.database}.{table_name}
-                        WHERE ticker = '{ticker}'
-                        GROUP BY {timestamp_col}, indicator_type
-                    )
+                    FROM {db.database}.{table_name}
+                    WHERE ticker = '{ticker}'
+                    GROUP BY ticker, indicator_type
                 )
-                SETTINGS 
-                    max_memory_usage = 80000000000,
-                    max_bytes_before_external_group_by = 20000000000,
-                    group_by_overflow_mode = 'any'
+                SETTINGS mutations_sync = 2
                 """
             else:
                 # For other tables, keep one row per ticker + timestamp combination
                 delete_query = f"""
-                DELETE FROM {db.database}.{table_name} 
-                WHERE ticker = '{ticker}'
+                ALTER TABLE {db.database}.{table_name}
+                DELETE WHERE ticker = '{ticker}'
                 AND {timestamp_col} NOT IN (
-                    SELECT {timestamp_col}
-                    FROM (
-                        SELECT
-                            {timestamp_col},
-                            argMin(rowNumberInAllBlocks(), {timestamp_col}) as min_row
-                        FROM {db.database}.{table_name}
-                        WHERE ticker = '{ticker}'
-                        GROUP BY {timestamp_col}
-                    )
+                    SELECT 
+                        MIN({timestamp_col})
+                    FROM {db.database}.{table_name}
+                    WHERE ticker = '{ticker}'
+                    GROUP BY ticker
                 )
-                SETTINGS 
-                    max_memory_usage = 80000000000,
-                    max_bytes_before_external_group_by = 20000000000,
-                    group_by_overflow_mode = 'any'
+                SETTINGS mutations_sync = 2
                 """
             db.client.command(delete_query)
         
