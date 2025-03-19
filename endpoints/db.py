@@ -137,11 +137,13 @@ class ClickHouseDB:
                         if col in timestamp_fields and isinstance(val, (int, float)):
                             try:
                                 if len(str(int(val))) >= 19:  # nanoseconds
-                                    val = datetime.fromtimestamp(val / 1e9)
+                                    dt = datetime.fromtimestamp(val / 1e9)
                                 elif len(str(int(val))) >= 13:  # milliseconds
-                                    val = datetime.fromtimestamp(val / 1e3)
+                                    dt = datetime.fromtimestamp(val / 1e3)
                                 else:  # seconds
-                                    val = datetime.fromtimestamp(val)
+                                    dt = datetime.fromtimestamp(val)
+                                # Convert to EST
+                                val = self._convert_to_est(dt)
                             except Exception as e:
                                 print(f"Error converting timestamp {col}: {str(e)}")
                                 val = None

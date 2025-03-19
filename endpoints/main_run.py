@@ -7,7 +7,7 @@ import argparse
 import pytz
 
 # List of tickers to process
-tickers = ["AAPL"]
+tickers = ["AAPL", "AMZN", "TSLA", "NVDA", "MSFT", "GOOGL", "META", "AMD"]
 
 # Mode configuration
 TimeseriesMode = Literal["historical", "live"]
