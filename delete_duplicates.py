@@ -44,34 +44,18 @@ def delete_duplicates(db: ClickHouseDB, table_name: str, dry_run: bool = True) -
         total_rows = result.result_rows[0][0]
 
         # Count unique combinations
-        if table_name == 'stock_indicators':
-            # For indicators table, count unique combinations of ticker, timestamp and indicator_type
-            unique_query = f"""
-                SELECT count()
-                FROM (
-                    SELECT ticker, {timestamp_col}, indicator_type
-                    FROM {db.database}.{table_name}
-                    GROUP BY ticker, {timestamp_col}, indicator_type
-                    SETTINGS 
-                        max_memory_usage = 80000000000,
-                        max_bytes_before_external_group_by = 20000000000,
-                        group_by_overflow_mode = 'any'
-                )
-            """
-        else:
-            # For other tables, count unique combinations of ticker and timestamp
-            unique_query = f"""
-                SELECT count()
-                FROM (
-                    SELECT ticker, {timestamp_col}
-                    FROM {db.database}.{table_name}
-                    GROUP BY ticker, {timestamp_col}
-                    SETTINGS 
-                        max_memory_usage = 80000000000,
-                        max_bytes_before_external_group_by = 20000000000,
-                        group_by_overflow_mode = 'any'
-                )
-            """
+        unique_query = f"""
+            SELECT count()
+            FROM (
+                SELECT uni_id
+                FROM {db.database}.{table_name}
+                GROUP BY uni_id
+                SETTINGS 
+                    max_memory_usage = 80000000000,
+                    max_bytes_before_external_group_by = 20000000000,
+                    group_by_overflow_mode = 'any'
+            )
+        """
         result = db.client.query(unique_query)
         unique_combinations = result.result_rows[0][0]
         duplicate_count = total_rows - unique_combinations
@@ -98,58 +82,26 @@ def delete_duplicates(db: ClickHouseDB, table_name: str, dry_run: bool = True) -
         initial_total = total_rows
         expected_after = unique_combinations
         
-        # Delete duplicates using the same structure as our unique query
-        if table_name == 'stock_indicators':
-            delete_query = f"""
-                ALTER TABLE {db.database}.{table_name}
-                DELETE WHERE (ticker, {timestamp_col}, indicator_type) NOT IN (
-                    SELECT 
-                        ticker,
-                        {timestamp_col},
-                        indicator_type
+        # Delete duplicates using uni_id
+        delete_query = f"""
+            ALTER TABLE {db.database}.{table_name}
+            DELETE WHERE uni_id NOT IN (
+                SELECT uni_id
+                FROM (
+                    SELECT
+                        uni_id,
+                        min(_row_num) as min_row_num
                     FROM (
-                        SELECT
-                            ticker,
-                            {timestamp_col},
-                            indicator_type,
-                            min(_row_num) as min_row_num
-                        FROM (
-                            SELECT 
-                                ticker,
-                                {timestamp_col},
-                                indicator_type,
-                                row_number() OVER (PARTITION BY ticker, {timestamp_col}, indicator_type ORDER BY {timestamp_col}) as _row_num
-                            FROM {db.database}.{table_name}
-                        )
-                        GROUP BY ticker, {timestamp_col}, indicator_type
+                        SELECT 
+                            uni_id,
+                            row_number() OVER (PARTITION BY uni_id ORDER BY {timestamp_col}) as _row_num
+                        FROM {db.database}.{table_name}
                     )
+                    GROUP BY uni_id
                 )
-                SETTINGS mutations_sync = 2
-            """
-        else:
-            delete_query = f"""
-                ALTER TABLE {db.database}.{table_name}
-                DELETE WHERE (ticker, {timestamp_col}) NOT IN (
-                    SELECT 
-                        ticker,
-                        {timestamp_col}
-                    FROM (
-                        SELECT
-                            ticker,
-                            {timestamp_col},
-                            min(_row_num) as min_row_num
-                        FROM (
-                            SELECT 
-                                ticker,
-                                {timestamp_col},
-                                row_number() OVER (PARTITION BY ticker, {timestamp_col} ORDER BY {timestamp_col}) as _row_num
-                            FROM {db.database}.{table_name}
-                        )
-                        GROUP BY ticker, {timestamp_col}
-                    )
-                )
-                SETTINGS mutations_sync = 2
-            """
+            )
+            SETTINGS mutations_sync = 2
+        """
         db.client.command(delete_query)
         
         # Get count after deletion

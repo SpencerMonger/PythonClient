@@ -5,6 +5,7 @@ from clickhouse_connect.driver.client import Client
 from endpoints import config
 import time
 from datetime import datetime
+import hashlib
 
 class ClickHouseDB:
     def __init__(self):
@@ -17,6 +18,15 @@ class ClickHouseDB:
             secure=config.CLICKHOUSE_SECURE
         )
         self.database = config.CLICKHOUSE_DATABASE
+
+    def _generate_consistent_hash(self, *args) -> int:
+        """Generate a consistent hash from the given arguments"""
+        # Convert all arguments to strings and join with a delimiter
+        hash_str = ':'.join(str(arg or '') for arg in args)
+        # Use SHA256 for consistent hashing
+        hash_obj = hashlib.sha256(hash_str.encode('utf-8'))
+        # Convert first 8 bytes to integer and ensure it's positive
+        return int.from_bytes(hash_obj.digest()[:8], byteorder='big') % (2**63)
 
     async def insert_data(self, table_name: str, data: List[Dict[str, Any]]) -> None:
         """
@@ -71,11 +81,10 @@ class ClickHouseDB:
                             else:
                                 timestamp_str = str(timestamp or '')
                             
-                            # Generate hash directly without using cityHash64
-                            ticker = row.get('ticker', '')
-                            indicator_type = row.get('indicator_type', '')
-                            # Use Python's hash function as a fallback
-                            row['uni_id'] = abs(hash(f"{ticker}:{timestamp_str}:{indicator_type}"))
+                            # Generate consistent hash using dedicated method
+                            ticker = str(row.get('ticker', ''))
+                            indicator_type = str(row.get('indicator_type', ''))
+                            row['uni_id'] = self._generate_consistent_hash(ticker, timestamp_str, indicator_type)
                         except Exception as e:
                             print(f"Error generating uni_id for indicators: {str(e)}")
                             row['uni_id'] = 0  # Fallback value
@@ -89,10 +98,9 @@ class ClickHouseDB:
                             else:
                                 timestamp_str = str(main_timestamp or '')
                             
-                            # Generate hash directly without using cityHash64
-                            ticker = row.get('ticker', '')
-                            # Use Python's hash function as a fallback
-                            row['uni_id'] = abs(hash(f"{ticker}:{timestamp_str}"))
+                            # Generate consistent hash using dedicated method
+                            ticker = str(row.get('ticker', ''))
+                            row['uni_id'] = self._generate_consistent_hash(ticker, timestamp_str)
                         except Exception as e:
                             print(f"Error generating uni_id: {str(e)}")
                             row['uni_id'] = 0  # Fallback value
@@ -219,7 +227,9 @@ class ClickHouseDB:
                 # First add timestamp and ticker if they exist
                 # Handle different timestamp column names
                 timestamp_col = None
-                if 'timestamp' in schema:
+                if table_name in ['stock_trades', 'stock_quotes']:
+                    timestamp_col = 'sip_timestamp'
+                elif 'timestamp' in schema:
                     timestamp_col = 'timestamp'
                 elif 'sip_timestamp' in schema:
                     timestamp_col = 'sip_timestamp'
@@ -254,13 +264,22 @@ class ClickHouseDB:
                         CREATE TABLE IF NOT EXISTS {self.database}.{table_name} (
                             {columns_def}
                         ) ENGINE = MergeTree()
-                        ORDER BY ({timestamp_col or 'timestamp'}, ticker)
+                        ORDER BY (timestamp, ticker)
                         SETTINGS 
                             index_granularity = 8192,
                             min_bytes_for_wide_part = 0,
                             min_rows_for_wide_part = 0,
                             parts_to_delay_insert = 0,
                             max_parts_in_total = 100000
+                        """
+                    elif table_name in ['stock_trades', 'stock_quotes']:
+                        # For trades and quotes, use sip_timestamp
+                        query = f"""
+                        CREATE TABLE IF NOT EXISTS {self.database}.{table_name} (
+                            {columns_def}
+                        ) ENGINE = MergeTree()
+                        ORDER BY (sip_timestamp, ticker)
+                        SETTINGS index_granularity = 8192
                         """
                     else:
                         # Default settings for other tables
