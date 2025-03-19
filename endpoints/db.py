@@ -6,6 +6,7 @@ from endpoints import config
 import time
 from datetime import datetime
 import hashlib
+import pytz
 
 class ClickHouseDB:
     def __init__(self):
@@ -18,6 +19,7 @@ class ClickHouseDB:
             secure=config.CLICKHOUSE_SECURE
         )
         self.database = config.CLICKHOUSE_DATABASE
+        self.timezone = pytz.timezone('America/New_York')  # EST timezone
 
     def _generate_consistent_hash(self, *args) -> int:
         """Generate a consistent hash from the given arguments"""
@@ -27,6 +29,17 @@ class ClickHouseDB:
         hash_obj = hashlib.sha256(hash_str.encode('utf-8'))
         # Convert first 8 bytes to integer and ensure it's positive
         return int.from_bytes(hash_obj.digest()[:8], byteorder='big') % (2**63)
+
+    def _convert_to_est(self, timestamp: datetime) -> datetime:
+        """Convert a datetime to EST timezone"""
+        if timestamp.tzinfo is None:
+            # If timestamp is naive, assume it's in UTC
+            utc_dt = pytz.UTC.localize(timestamp)
+        else:
+            # If timestamp has timezone, convert to UTC first
+            utc_dt = timestamp.astimezone(pytz.UTC)
+        # Convert to EST
+        return utc_dt.astimezone(self.timezone)
 
     async def insert_data(self, table_name: str, data: List[Dict[str, Any]]) -> None:
         """
@@ -51,19 +64,23 @@ class ClickHouseDB:
                             if isinstance(val, (int, float)):
                                 # Convert nanoseconds to datetime
                                 if len(str(int(val))) >= 19:  # nanoseconds
-                                    row[field] = datetime.fromtimestamp(val / 1e9)
+                                    dt = datetime.fromtimestamp(val / 1e9)
                                 # Convert milliseconds to datetime
                                 elif len(str(int(val))) >= 13:  # milliseconds
-                                    row[field] = datetime.fromtimestamp(val / 1e3)
+                                    dt = datetime.fromtimestamp(val / 1e3)
                                 else:  # seconds
-                                    row[field] = datetime.fromtimestamp(val)
+                                    dt = datetime.fromtimestamp(val)
+                                # Convert to EST
+                                row[field] = self._convert_to_est(dt)
                             elif isinstance(val, str):
                                 # Try to parse string timestamps
                                 try:
-                                    row[field] = datetime.strptime(val, '%Y-%m-%d %H:%M:%S')
+                                    dt = datetime.strptime(val, '%Y-%m-%d %H:%M:%S')
+                                    row[field] = self._convert_to_est(dt)
                                 except ValueError:
                                     try:
-                                        row[field] = datetime.strptime(val, '%Y-%m-%d')
+                                        dt = datetime.strptime(val, '%Y-%m-%d')
+                                        row[field] = self._convert_to_est(dt)
                                     except ValueError:
                                         print(f"Warning: Could not parse timestamp string: {val}")
                     except Exception as e:
@@ -77,7 +94,8 @@ class ClickHouseDB:
                         try:
                             timestamp = row.get('timestamp')
                             if isinstance(timestamp, datetime):
-                                timestamp_str = timestamp.strftime('%Y-%m-%d %H:%M:%S')
+                                # Use full precision for timestamp string
+                                timestamp_str = timestamp.isoformat(' ', 'microseconds')
                             else:
                                 timestamp_str = str(timestamp or '')
                             
@@ -94,7 +112,8 @@ class ClickHouseDB:
                         try:
                             main_timestamp = row.get('timestamp') or row.get('sip_timestamp')
                             if isinstance(main_timestamp, datetime):
-                                timestamp_str = main_timestamp.strftime('%Y-%m-%d %H:%M:%S')
+                                # Use full precision for timestamp string
+                                timestamp_str = main_timestamp.isoformat(' ', 'microseconds')
                             else:
                                 timestamp_str = str(main_timestamp or '')
                             
@@ -246,6 +265,24 @@ class ClickHouseDB:
                     ORDER BY id
                     SETTINGS index_granularity = 8192
                     """
+                elif table_name == config.TABLE_STOCK_INDICATORS:
+                    # For indicators table, use timestamp, ticker, and indicator_type
+                    if timestamp_col:
+                        ordered_schema[timestamp_col] = schema.pop(timestamp_col)
+                    if 'ticker' in schema:
+                        ordered_schema['ticker'] = schema.pop('ticker')
+                    if 'indicator_type' in schema:
+                        ordered_schema['indicator_type'] = schema.pop('indicator_type')
+                    ordered_schema.update(schema)
+                    
+                    columns_def = ", ".join(f"{col} {type_}" for col, type_ in ordered_schema.items())
+                    query = f"""
+                    CREATE TABLE IF NOT EXISTS {self.database}.{table_name} (
+                        {columns_def}
+                    ) ENGINE = MergeTree()
+                    ORDER BY (timestamp, ticker, indicator_type)
+                    SETTINGS index_granularity = 8192
+                    """
                 else:
                     # For all other tables, enforce timestamp/ticker ordering
                     if timestamp_col:
@@ -264,7 +301,7 @@ class ClickHouseDB:
                         CREATE TABLE IF NOT EXISTS {self.database}.{table_name} (
                             {columns_def}
                         ) ENGINE = MergeTree()
-                        ORDER BY (timestamp, ticker)
+                        ORDER BY (timestamp, ticker, uni_id)
                         SETTINGS 
                             index_granularity = 8192,
                             min_bytes_for_wide_part = 0,
@@ -278,7 +315,7 @@ class ClickHouseDB:
                         CREATE TABLE IF NOT EXISTS {self.database}.{table_name} (
                             {columns_def}
                         ) ENGINE = MergeTree()
-                        ORDER BY (sip_timestamp, ticker)
+                        ORDER BY (sip_timestamp, ticker, uni_id)
                         SETTINGS index_granularity = 8192
                         """
                     else:
@@ -287,7 +324,7 @@ class ClickHouseDB:
                         CREATE TABLE IF NOT EXISTS {self.database}.{table_name} (
                             {columns_def}
                         ) ENGINE = MergeTree()
-                        ORDER BY ({timestamp_col or 'timestamp'}, ticker)
+                        ORDER BY ({timestamp_col or 'timestamp'}, ticker, uni_id)
                         SETTINGS index_granularity = 8192
                         """
                 

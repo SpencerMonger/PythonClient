@@ -5,8 +5,9 @@ def analyze_table(db: ClickHouseDB, table_name: str):
     print("-" * 50)
     
     # Get sample rows
+    timestamp_col = 'sip_timestamp' if table_name in ['stock_trades', 'stock_quotes'] else 'timestamp'
     sample_query = f"""
-    SELECT ticker, timestamp, uni_id, count() OVER (PARTITION BY uni_id) as count_per_id
+    SELECT ticker, {timestamp_col}, uni_id, count() OVER (PARTITION BY uni_id) as count_per_id
     FROM {db.database}.{table_name}
     LIMIT 10
     """
