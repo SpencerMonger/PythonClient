@@ -38,12 +38,12 @@ def delete_duplicates(db: ClickHouseDB, table_name: str, dry_run: bool = True) -
             else:
                 return {'table': table_name, 'error': f'No timestamp column found in {table_name}'}
 
-        # First get just the total count which is very fast
+        # First get total count which is very fast
         count_query = f"SELECT count() FROM {db.database}.{table_name}"
         result = db.client.query(count_query)
         total_rows = result.result_rows[0][0]
 
-        # Then get unique count based on table type
+        # Count unique combinations
         if table_name == 'stock_indicators':
             # For indicators table, count unique combinations of ticker, timestamp and indicator_type
             unique_query = f"""
@@ -98,44 +98,59 @@ def delete_duplicates(db: ClickHouseDB, table_name: str, dry_run: bool = True) -
         initial_total = total_rows
         expected_after = unique_combinations
         
-        # Get list of tickers to process in chunks
-        tickers_query = f"SELECT DISTINCT ticker FROM {db.database}.{table_name}"
-        result = db.client.query(tickers_query)
-        tickers = [row[0] for row in result.result_rows]
-        
-        # Process each ticker separately to reduce memory usage
-        total_deleted = 0
-        for ticker in tickers:
-            if table_name == 'stock_indicators':
-                # For indicators table, keep one row per ticker + timestamp + indicator_type combination
-                delete_query = f"""
+        # Delete duplicates using the same structure as our unique query
+        if table_name == 'stock_indicators':
+            delete_query = f"""
                 ALTER TABLE {db.database}.{table_name}
-                DELETE WHERE ticker = '{ticker}'
-                AND ({timestamp_col}, indicator_type) NOT IN (
+                DELETE WHERE (ticker, {timestamp_col}, indicator_type) NOT IN (
                     SELECT 
-                        MIN({timestamp_col}),
+                        ticker,
+                        {timestamp_col},
                         indicator_type
-                    FROM {db.database}.{table_name}
-                    WHERE ticker = '{ticker}'
-                    GROUP BY ticker, indicator_type
+                    FROM (
+                        SELECT
+                            ticker,
+                            {timestamp_col},
+                            indicator_type,
+                            min(_row_num) as min_row_num
+                        FROM (
+                            SELECT 
+                                ticker,
+                                {timestamp_col},
+                                indicator_type,
+                                row_number() OVER (PARTITION BY ticker, {timestamp_col}, indicator_type ORDER BY {timestamp_col}) as _row_num
+                            FROM {db.database}.{table_name}
+                        )
+                        GROUP BY ticker, {timestamp_col}, indicator_type
+                    )
                 )
                 SETTINGS mutations_sync = 2
-                """
-            else:
-                # For other tables, keep one row per ticker + timestamp combination
-                delete_query = f"""
+            """
+        else:
+            delete_query = f"""
                 ALTER TABLE {db.database}.{table_name}
-                DELETE WHERE ticker = '{ticker}'
-                AND {timestamp_col} NOT IN (
+                DELETE WHERE (ticker, {timestamp_col}) NOT IN (
                     SELECT 
-                        MIN({timestamp_col})
-                    FROM {db.database}.{table_name}
-                    WHERE ticker = '{ticker}'
-                    GROUP BY ticker
+                        ticker,
+                        {timestamp_col}
+                    FROM (
+                        SELECT
+                            ticker,
+                            {timestamp_col},
+                            min(_row_num) as min_row_num
+                        FROM (
+                            SELECT 
+                                ticker,
+                                {timestamp_col},
+                                row_number() OVER (PARTITION BY ticker, {timestamp_col} ORDER BY {timestamp_col}) as _row_num
+                            FROM {db.database}.{table_name}
+                        )
+                        GROUP BY ticker, {timestamp_col}
+                    )
                 )
                 SETTINGS mutations_sync = 2
-                """
-            db.client.command(delete_query)
+            """
+        db.client.command(delete_query)
         
         # Get count after deletion
         result = db.client.query(f"SELECT count() FROM {db.database}.{table_name}")

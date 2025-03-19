@@ -8,6 +8,7 @@ from endpoints import config
 # Schema for master stock data table
 MASTER_SCHEMA = {
     # Common fields
+    "uni_id": "UInt64",  # Unique ID based on ticker and timestamp
     "ticker": "String",
     "timestamp": "DateTime64(9)",  # Base timestamp at minute intervals
     
@@ -78,6 +79,7 @@ MASTER_SCHEMA = {
 # Schema for normalized stock data table
 NORMALIZED_SCHEMA = {
     # Non-normalized fields
+    "uni_id": "UInt64",  # Unique ID based on ticker and timestamp
     "ticker": "String",
     "timestamp": "DateTime64(9)",
     "target": "Nullable(Int32)",
@@ -157,6 +159,7 @@ async def create_normalized_table(db: ClickHouseDB) -> None:
         SELECT *
         FROM (
             SELECT
+                uni_id,
                 ticker,
                 timestamp,
                 target,
@@ -453,6 +456,12 @@ async def create_master_table(db: ClickHouseDB) -> None:
         db.client.command(create_table_query)
         print("Created master table successfully")
         
+        # Ensure source tables exist before populating
+        tables_to_check = ['stock_bars', 'stock_quotes', 'stock_trades', 'stock_indicators']
+        for table in tables_to_check:
+            if not db.table_exists(table):
+                raise Exception(f"Source table {table} does not exist. Please create source tables first.")
+        
         # Populate the master table with existing data
         populate_query = f"""
         INSERT INTO {db.database}.{config.TABLE_STOCK_MASTER}
@@ -461,6 +470,7 @@ async def create_master_table(db: ClickHouseDB) -> None:
             SELECT
                 ticker,
                 toStartOfMinute(sip_timestamp) AS timestamp,
+                cityHash64(ticker, toString(toStartOfMinute(sip_timestamp))) as uni_id,
                 avg(bid_price) AS avg_bid_price,
                 avg(ask_price) AS avg_ask_price,
                 min(bid_price) AS min_bid_price,
@@ -478,6 +488,7 @@ async def create_master_table(db: ClickHouseDB) -> None:
             SELECT
                 ticker,
                 toStartOfMinute(sip_timestamp) AS timestamp,
+                cityHash64(ticker, toString(toStartOfMinute(sip_timestamp))) as uni_id,
                 avg(price) AS avg_trade_price,
                 min(price) AS min_trade_price,
                 max(price) AS max_trade_price,
@@ -492,6 +503,7 @@ async def create_master_table(db: ClickHouseDB) -> None:
             SELECT 
                 ticker,
                 timestamp,
+                cityHash64(ticker, toString(timestamp)) as uni_id,
                 open,
                 high,
                 low,
@@ -513,6 +525,7 @@ async def create_master_table(db: ClickHouseDB) -> None:
             SELECT
                 ticker,
                 timestamp,
+                cityHash64(ticker, toString(timestamp)) as uni_id,
                 any(if(indicator_type = 'SMA_5', value, NULL)) AS sma_5,
                 any(if(indicator_type = 'SMA_9', value, NULL)) AS sma_9,
                 any(if(indicator_type = 'SMA_12', value, NULL)) AS sma_12,
@@ -531,6 +544,7 @@ async def create_master_table(db: ClickHouseDB) -> None:
             GROUP BY ticker, timestamp
         )
         SELECT
+            b.uni_id,
             b.ticker,
             b.timestamp,
             b.open,
@@ -557,7 +571,7 @@ async def create_master_table(db: ClickHouseDB) -> None:
             q.total_bid_size,
             q.total_ask_size,
             q.quote_count,
-            q.quote_conditions,
+            coalesce(q.quote_conditions, '') as quote_conditions,
             q.ask_exchange,
             q.bid_exchange,
             t.avg_trade_price,
@@ -565,7 +579,7 @@ async def create_master_table(db: ClickHouseDB) -> None:
             t.max_trade_price,
             t.total_trade_size,
             t.trade_count,
-            t.trade_conditions,
+            coalesce(t.trade_conditions, '') as trade_conditions,
             t.trade_exchange,
             i.sma_5,
             i.sma_9,
