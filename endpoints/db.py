@@ -53,6 +53,10 @@ class ClickHouseDB:
             prep_start = time.time()
             columns = list(data[0].keys())
             
+            # Store total rows for sampling
+            self._total_rows = len(data)
+            self._current_row_index = 0
+            
             # Convert timestamps to datetime if they're integers
             for row in data:
                 # Handle different timestamp field names
@@ -90,8 +94,9 @@ class ClickHouseDB:
             if 'uni_id' not in columns:
                 # For indicators table, use ticker + timestamp + indicator_type
                 if table_name == config.TABLE_STOCK_INDICATORS:
-                    for row in data:
+                    for i, row in enumerate(data):
                         try:
+                            self._current_row_index = i  # Update current row index
                             timestamp = row.get('timestamp')
                             if isinstance(timestamp, datetime):
                                 # Use full precision for timestamp string
@@ -102,13 +107,22 @@ class ClickHouseDB:
                             # Generate consistent hash using dedicated method
                             ticker = str(row.get('ticker', ''))
                             indicator_type = str(row.get('indicator_type', ''))
+                            # Only print debug info for 10 random rows
+                            if i % max(1, len(data) // 10) == 0:
+                                print(f"\nDebug - Indicator Hash Inputs:")
+                                print(f"Ticker: {ticker}")
+                                print(f"Timestamp: {timestamp}")
+                                print(f"Timestamp String: {timestamp_str}")
+                                print(f"Indicator Type: {indicator_type}")
                             row['uni_id'] = self._generate_consistent_hash(ticker, timestamp_str, indicator_type)
+                            if i % max(1, len(data) // 10) == 0:
+                                print(f"Generated Hash: {row['uni_id']}")
                         except Exception as e:
                             print(f"Error generating uni_id for indicators: {str(e)}")
                             row['uni_id'] = 0  # Fallback value
                 else:
                     # For all other tables, use ticker + timestamp
-                    for row in data:
+                    for i, row in enumerate(data):
                         try:
                             main_timestamp = row.get('timestamp') or row.get('sip_timestamp')
                             if isinstance(main_timestamp, datetime):
@@ -119,7 +133,15 @@ class ClickHouseDB:
                             
                             # Generate consistent hash using dedicated method
                             ticker = str(row.get('ticker', ''))
+                            # Only print debug info for 10 random rows
+                            if i % max(1, len(data) // 10) == 0:
+                                print(f"\nDebug - Regular Table Hash Inputs:")
+                                print(f"Ticker: {ticker}")
+                                print(f"Timestamp: {main_timestamp}")
+                                print(f"Timestamp String: {timestamp_str}")
                             row['uni_id'] = self._generate_consistent_hash(ticker, timestamp_str)
+                            if i % max(1, len(data) // 10) == 0:
+                                print(f"Generated Hash: {row['uni_id']}")
                         except Exception as e:
                             print(f"Error generating uni_id: {str(e)}")
                             row['uni_id'] = 0  # Fallback value
@@ -177,7 +199,6 @@ class ClickHouseDB:
                         schema_start = time.time()
                         schema = self.client.command(f"DESCRIBE TABLE {self.database}.{table_name}")
                         print(f"Schema retrieval took: {time.time() - schema_start:.2f} seconds")
-                        print(f"Table schema: {schema}")
                     except Exception as e:
                         print(f"Error getting schema: {str(e)}")
                     
@@ -282,6 +303,7 @@ class ClickHouseDB:
                     CREATE TABLE IF NOT EXISTS {self.database}.{table_name} (
                         {columns_def}
                     ) ENGINE = MergeTree()
+                    PRIMARY KEY (timestamp, ticker, indicator_type)
                     ORDER BY (timestamp, ticker, indicator_type)
                     SETTINGS index_granularity = 8192
                     """

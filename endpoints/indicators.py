@@ -310,4 +310,4 @@ async def init_indicators_table(db: ClickHouseDB) -> None:
     """
     Initialize the stock indicators table
     """
-    db.create_table_if_not_exists(config.TABLE_STOCK_INDICATORS, INDICATORS_SCHEMA) 
+    db.recreate_table(config.TABLE_STOCK_INDICATORS, INDICATORS_SCHEMA) 

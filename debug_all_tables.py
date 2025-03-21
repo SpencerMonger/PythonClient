@@ -267,13 +267,9 @@ def get_table_info(db: ClickHouseDB, table_name: str) -> dict:
 
 def count_duplicates(db: ClickHouseDB, table_name: str) -> dict:
     """
-    Count duplicate rows in a table based on timestamp only.
-    For stock_indicators table, count based on timestamp and indicator_type combination.
+    Count duplicate rows in a table based on uni_id.
     """
     try:
-        # Determine timestamp column based on table name
-        timestamp_col = 'sip_timestamp' if table_name in ['stock_trades', 'stock_quotes'] else 'timestamp'
-        
         # First check if the table exists and get its columns
         check_query = f"""
             SELECT name 
@@ -286,46 +282,23 @@ def count_duplicates(db: ClickHouseDB, table_name: str) -> dict:
         
         if not columns:
             return {'table': table_name, 'error': f'Table {table_name} not found'}
+        
+        # Determine timestamp column based on table name
+        timestamp_col = 'sip_timestamp' if table_name in ['stock_trades', 'stock_quotes'] else 'timestamp'
             
-        # Find the timestamp column
-        if timestamp_col not in columns:
-            timestamp_alternatives = ['t', 'time', 'date', 'datetime', 'created_at', 'updated', 'ex_date']
-            for alt in timestamp_alternatives:
-                if alt in columns:
-                    timestamp_col = alt
-                    break
-            else:
-                return {'table': table_name, 'error': f'No timestamp column found in {table_name}'}
-
         # Get counts and timestamp range in a single query
-        if table_name == 'stock_indicators':
-            count_query = f"""
-                SELECT 
-                    count() as total,
-                    (
-                        SELECT count()
-                        FROM (
-                            SELECT DISTINCT {timestamp_col}, indicator_type
-                            FROM {db.database}.{table_name}
-                            SETTINGS 
-                                max_memory_usage = 80000000000,
-                                max_bytes_before_external_group_by = 20000000000,
-                                group_by_overflow_mode = 'any'
-                        )
-                    ) as unique_combinations,
-                    min({timestamp_col}) as earliest_timestamp,
-                    max({timestamp_col}) as latest_timestamp
-                FROM {db.database}.{table_name}
-            """
-        else:
-            count_query = f"""
-                SELECT 
-                    count() as total,
-                    count(DISTINCT {timestamp_col}) as unique_timestamps,
-                    min({timestamp_col}) as earliest_timestamp,
-                    max({timestamp_col}) as latest_timestamp
-                FROM {db.database}.{table_name}
-            """
+        count_query = f"""
+            SELECT 
+                count() as total,
+                count(DISTINCT uni_id) as unique_ids,
+                min({timestamp_col}) as earliest_timestamp,
+                max({timestamp_col}) as latest_timestamp
+            FROM {db.database}.{table_name}
+            SETTINGS 
+                max_memory_usage = 80000000000,
+                max_bytes_before_external_group_by = 20000000000,
+                group_by_overflow_mode = 'any'
+        """
         result = db.client.query(count_query)
         
         if not result.result_rows:
@@ -341,10 +314,9 @@ def count_duplicates(db: ClickHouseDB, table_name: str) -> dict:
         return {
             'table': table_name,
             'total_rows': total_rows,
-            'unique_timestamps': unique_count,
+            'unique_ids': unique_count,
             'duplicate_rows': duplicate_count,
             'duplicate_percent': duplicate_percent,
-            'timestamp_column': timestamp_col,
             'earliest_timestamp': earliest_timestamp,
             'latest_timestamp': latest_timestamp
         }
@@ -352,8 +324,46 @@ def count_duplicates(db: ClickHouseDB, table_name: str) -> dict:
     except Exception as e:
         return {'table': table_name, 'error': str(e)}
 
+def analyze_ticker_data(db: ClickHouseDB, table_name: str) -> List[Dict]:
+    """
+    Analyze data for each unique ticker in a table, showing time span and row count.
+    
+    Args:
+        db: ClickHouseDB instance
+        table_name: Name of the table to analyze
+        
+    Returns:
+        List of dictionaries containing ticker analysis data
+    """
+    try:
+        # Determine timestamp column based on table name
+        timestamp_col = 'sip_timestamp' if table_name in ['stock_trades', 'stock_quotes'] else 'timestamp'
+        
+        # Query to get ticker-specific stats
+        query = f"""
+            SELECT 
+                ticker,
+                count(*) as total_rows,
+                min({timestamp_col}) as earliest_timestamp,
+                max({timestamp_col}) as latest_timestamp,
+                count(DISTINCT toDate({timestamp_col})) as unique_days
+            FROM {db.database}.{table_name}
+            GROUP BY ticker
+            ORDER BY ticker ASC
+            SETTINGS 
+                max_memory_usage = 80000000000,
+                max_bytes_before_external_group_by = 20000000000,
+                group_by_overflow_mode = 'any'
+        """
+        
+        result = db.client.query(query)
+        return result.result_rows
+    except Exception as e:
+        print(f"Error analyzing ticker data for {table_name}: {str(e)}")
+        return []
+
 def analyze_all_tables():
-    """Generate a simple readout of all tables in the database with focus on duplicates"""
+    """Generate a simple readout of all tables in the database with focus on duplicates and ticker data"""
     db = ClickHouseDB()
     
     # List of tables to analyze
@@ -373,20 +383,34 @@ def analyze_all_tables():
     
     for table in tables:
         print(f"\nAnalyzing table: {table}")
-        print("-" * 30)
+        print("=" * 30)
         
         # Count duplicates
         dup_info = count_duplicates(db, table)
         if 'error' in dup_info:
             print(f"Error: {dup_info['error']}")
-        else:
-            print(f"Total Rows: {dup_info['total_rows']:,}")
-            print(f"Unique Timestamps: {dup_info['unique_timestamps']:,}")
-            print(f"Duplicate Rows: {dup_info['duplicate_rows']:,}")
-            print(f"Duplicate Percentage: {dup_info['duplicate_percent']:.2f}%")
-            print(f"Using Timestamp Column: {dup_info['timestamp_column']}")
-            print(f"Earliest Timestamp: {dup_info['earliest_timestamp']}")
-            print(f"Latest Timestamp: {dup_info['latest_timestamp']}")
+            continue
+            
+        print(f"Total Rows: {dup_info['total_rows']:,}")
+        print(f"Unique IDs: {dup_info['unique_ids']:,}")
+        print(f"Duplicate Rows: {dup_info['duplicate_rows']:,}")
+        print(f"Duplicate Percentage: {dup_info['duplicate_percent']:.2f}%")
+        
+        # Get ticker-specific analysis
+        print("\nTicker Analysis:")
+        print("-" * 30)
+        print(f"{'Ticker':<10} {'Total Rows':<12} {'Start Date':<25} {'End Date':<25} {'Days':<8}")
+        print("-" * 80)
+        
+        ticker_data = analyze_ticker_data(db, table)
+        for row in ticker_data:
+            # Access tuple elements by index
+            ticker = row[0]          # ticker
+            total = row[1]          # total_rows
+            start = row[2]          # earliest_timestamp
+            end = row[3]           # latest_timestamp
+            days = row[4]          # unique_days
+            print(f"{ticker:<10} {total:<12,} {str(start):<25} {str(end):<25} {days:<8,}")
         
         print("-" * 30)
     

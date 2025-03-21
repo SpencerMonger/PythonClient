@@ -107,22 +107,48 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
                                 tzinfo=trade_to.tzinfo)
             trade_to = trade_from + timedelta(minutes=1)
             
-        trade_data = await trades.fetch_trades(ticker, trade_from, trade_to)
-        trade_fetch_time = time.time() - trade_start_time
-        
-        if trade_data:
-            print(f"Found {len(trade_data)} trades (fetched in {trade_fetch_time:.2f} seconds)")
-            print("Storing trade data...")
-            print(f"Sample trade data structure: {trade_data[0]}")  # Debug print
-            print(f"Timestamp type: {type(trade_data[0]['sip_timestamp'])}")  # Debug print
+        try:
+            # Process trades in smaller time chunks to avoid memory issues
+            chunk_size = timedelta(days=1)  # Process 24 hours at a time
+            current_from = trade_from
+            total_trades = 0
+            first_chunk = True  # Flag to print sample data only for first chunk
             
-            store_start_time = time.time()
-            await trades.store_trades(db, trade_data)
-            store_time = time.time() - store_start_time
-            print(f"Trade data stored successfully in {store_time:.2f} seconds")
-            print(f"Trade data processing ratio: {store_time/trade_fetch_time:.2f}x slower than fetch")  # Debug print
-        else:
-            print(f"No trade data found (checked in {trade_fetch_time:.2f} seconds)")
+            while current_from < trade_to:
+                current_to = min(current_from + chunk_size, trade_to)
+                print(f"Fetching trades for {ticker} from {current_from.strftime('%H:%M:%S')} to {current_to.strftime('%H:%M:%S')} ET...")
+                
+                chunk_start_time = time.time()
+                chunk_trades = await trades.fetch_trades(ticker, current_from, current_to)
+                chunk_fetch_time = time.time() - chunk_start_time
+                
+                if chunk_trades:
+                    total_trades += len(chunk_trades)
+                    print(f"Found {len(chunk_trades)} trades in current chunk (fetched in {chunk_fetch_time:.2f} seconds)")
+                    print("Storing trade chunk...")
+                    
+                    if first_chunk:
+                        print(f"Sample trade data structure: {chunk_trades[0]}")  # Debug print
+                        print(f"Timestamp type: {type(chunk_trades[0]['sip_timestamp'])}")  # Debug print
+                        first_chunk = False
+                    
+                    store_start_time = time.time()
+                    await trades.store_trades(db, chunk_trades)
+                    store_time = time.time() - store_start_time
+                    print(f"Trade chunk stored successfully in {store_time:.2f} seconds")
+                    print(f"Trade chunk processing ratio: {store_time/chunk_fetch_time:.2f}x slower than fetch")  # Debug print
+                
+                current_from = current_to
+            
+            trade_fetch_time = time.time() - trade_start_time
+            if total_trades > 0:
+                print(f"Successfully processed {total_trades} total trades in {trade_fetch_time:.2f} seconds")
+            else:
+                print(f"No trade data found (checked in {trade_fetch_time:.2f} seconds)")
+                
+        except Exception as e:
+            print(f"Error fetching trades for {ticker}: {str(e)}")
+            print(f"No trade data found (checked in {time.time() - trade_start_time:.2f} seconds)")
         
         # Fetch and store quote data
         print(f"\nFetching quote data for {ticker}...")

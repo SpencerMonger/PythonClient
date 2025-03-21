@@ -7,14 +7,9 @@ import asyncio
 
 def delete_duplicates(db: ClickHouseDB, table_name: str, dry_run: bool = True) -> dict:
     """
-    Delete duplicate rows from a table, keeping only one row per unique combination:
-    - For stock_indicators: unique by (ticker, timestamp, indicator_type)
-    - For all other tables: unique by (ticker, timestamp)
+    Delete duplicate rows from a table based on uni_id
     """
     try:
-        # Determine timestamp column based on table name
-        timestamp_col = 'sip_timestamp' if table_name in ['stock_trades', 'stock_quotes'] else 'timestamp'
-        
         # First check if the table exists and get its columns
         check_query = f"""
             SELECT name 
@@ -28,43 +23,36 @@ def delete_duplicates(db: ClickHouseDB, table_name: str, dry_run: bool = True) -
         if not columns:
             return {'table': table_name, 'error': f'Table {table_name} not found'}
             
-        # Find the timestamp column
-        if timestamp_col not in columns:
-            timestamp_alternatives = ['t', 'time', 'date', 'datetime', 'created_at', 'updated', 'ex_date']
-            for alt in timestamp_alternatives:
-                if alt in columns:
-                    timestamp_col = alt
-                    break
-            else:
-                return {'table': table_name, 'error': f'No timestamp column found in {table_name}'}
+        # Determine timestamp column based on table name
+        timestamp_col = 'sip_timestamp' if table_name in ['stock_trades', 'stock_quotes'] else 'timestamp'
 
-        # First get total count which is very fast
+        # First get total count
         count_query = f"SELECT count() FROM {db.database}.{table_name}"
         result = db.client.query(count_query)
         total_rows = result.result_rows[0][0]
 
-        # Count unique combinations
-        unique_query = f"""
-            SELECT count()
-            FROM (
-                SELECT uni_id
+        # Count duplicates using the same logic as check_duplicates.py
+        duplicate_count_query = f"""
+            WITH counts AS (
+                SELECT uni_id, count(*) as cnt
                 FROM {db.database}.{table_name}
                 GROUP BY uni_id
-                SETTINGS 
-                    max_memory_usage = 80000000000,
-                    max_bytes_before_external_group_by = 20000000000,
-                    group_by_overflow_mode = 'any'
             )
+            SELECT 
+                sum(CASE WHEN cnt > 1 THEN cnt - 1 ELSE 0 END) as duplicate_count
+            FROM counts
+            SETTINGS 
+                max_memory_usage = 80000000000,
+                max_bytes_before_external_group_by = 20000000000,
+                group_by_overflow_mode = 'any'
         """
-        result = db.client.query(unique_query)
-        unique_combinations = result.result_rows[0][0]
-        duplicate_count = total_rows - unique_combinations
+        result = db.client.query(duplicate_count_query)
+        duplicate_count = result.result_rows[0][0]
         
         if duplicate_count == 0:
             return {
                 'table': table_name,
                 'total_rows': total_rows,
-                'unique_combinations': unique_combinations,
                 'duplicate_rows': 0,
                 'message': 'No duplicates found'
             }
@@ -73,32 +61,21 @@ def delete_duplicates(db: ClickHouseDB, table_name: str, dry_run: bool = True) -
             return {
                 'table': table_name,
                 'total_rows': total_rows,
-                'unique_combinations': unique_combinations,
                 'duplicate_rows': duplicate_count,
                 'message': f'Would delete {duplicate_count:,} duplicate rows'
             }
         
         # Store initial counts before deletion
         initial_total = total_rows
-        expected_after = unique_combinations
         
-        # Delete duplicates using uni_id
+        # Delete duplicates keeping only the first occurrence of each uni_id
         delete_query = f"""
             ALTER TABLE {db.database}.{table_name}
-            DELETE WHERE uni_id NOT IN (
-                SELECT uni_id
-                FROM (
-                    SELECT
-                        uni_id,
-                        min(_row_num) as min_row_num
-                    FROM (
-                        SELECT 
-                            uni_id,
-                            row_number() OVER (PARTITION BY uni_id ORDER BY {timestamp_col}) as _row_num
-                        FROM {db.database}.{table_name}
-                    )
-                    GROUP BY uni_id
-                )
+            DELETE WHERE _row_number > 1
+            FROM (
+                SELECT *,
+                    row_number() OVER (PARTITION BY uni_id ORDER BY {timestamp_col}) as _row_number
+                FROM {db.database}.{table_name}
             )
             SETTINGS mutations_sync = 2
         """
@@ -108,6 +85,16 @@ def delete_duplicates(db: ClickHouseDB, table_name: str, dry_run: bool = True) -
         result = db.client.query(f"SELECT count() FROM {db.database}.{table_name}")
         rows_after = result.result_rows[0][0]
         rows_deleted = initial_total - rows_after
+        
+        # Verify we didn't delete more rows than predicted
+        if rows_deleted != duplicate_count:
+            return {
+                'table': table_name,
+                'total_rows': initial_total,
+                'rows_after': rows_after,
+                'duplicate_rows': rows_deleted,
+                'error': f'CRITICAL ERROR: Deleted {rows_deleted:,} rows but expected to delete {duplicate_count:,} rows. Please restore from backup.'
+            }
         
         # Drop and reinitialize master tables if any rows were deleted
         if rows_deleted > 0:

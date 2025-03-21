@@ -263,6 +263,7 @@ async def populate_master_table(db: ClickHouseDB) -> None:
                 SELECT 
                     ticker,
                     timestamp,
+                    cityHash64(ticker, toString(timestamp)) as uni_id,
                     round(open, 2) as open,
                     round(high, 2) as high,
                     round(low, 2) as low,
@@ -330,6 +331,7 @@ async def populate_master_table(db: ClickHouseDB) -> None:
                 SELECT
                     ticker,
                     timestamp,
+                    cityHash64(ticker, toString(timestamp)) as uni_id,
                     round(coalesce(nullIf(any(if(indicator_type = 'SMA_5', value, NULL)), 0), 2), 2) as sma_5,
                     round(coalesce(nullIf(any(if(indicator_type = 'SMA_9', value, NULL)), 0), 2), 2) as sma_9,
                     round(coalesce(nullIf(any(if(indicator_type = 'SMA_12', value, NULL)), 0), 2), 2) as sma_12,
@@ -361,14 +363,14 @@ async def populate_master_table(db: ClickHouseDB) -> None:
                 b.vwap,
                 b.transactions,
                 -- Price metrics
-                ((b.future_close - b.close) / nullIf(b.close, 0)) * 100 as price_diff,
+                b.price_diff,
                 b.max_price_diff,
                 multiIf(
-                    ((b.future_close - b.close) / nullIf(b.close, 0)) * 100 <= -1, 0,
-                    ((b.future_close - b.close) / nullIf(b.close, 0)) * 100 <= -0.5, 1,
-                    ((b.future_close - b.close) / nullIf(b.close, 0)) * 100 <= 0, 2,
-                    ((b.future_close - b.close) / nullIf(b.close, 0)) * 100 <= 0.5, 3,
-                    ((b.future_close - b.close) / nullIf(b.close, 0)) * 100 <= 1, 4,
+                    b.price_diff <= -1, 0,
+                    b.price_diff <= -0.5, 1,
+                    b.price_diff <= 0, 2,
+                    b.price_diff <= 0.5, 3,
+                    b.price_diff <= 1, 4,
                     5
                 ) as target,
                 -- Quote metrics
@@ -504,42 +506,50 @@ async def create_master_table(db: ClickHouseDB) -> None:
                 ticker,
                 timestamp,
                 cityHash64(ticker, toString(timestamp)) as uni_id,
-                open,
-                high,
-                low,
-                close,
-                volume,
-                vwap,
-                transactions,
-                max(high) OVER (PARTITION BY ticker, toDate(timestamp)) as daily_high,
-                min(low) OVER (PARTITION BY ticker, toDate(timestamp)) as daily_low,
-                lagInFrame(close) OVER (PARTITION BY ticker ORDER BY toDate(timestamp)) as previous_close,
-                ((any(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 15 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100 as price_diff,
-                greatest(
-                    abs(((max(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100),
-                    abs(((min(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100)
-                ) as max_price_diff
+                round(open, 2) as open,
+                round(high, 2) as high,
+                round(low, 2) as low,
+                round(close, 2) as close,
+                coalesce(nullIf(volume, 0), 2) as volume,
+                round(coalesce(nullIf(vwap, 0), 2), 2) as vwap,
+                coalesce(nullIf(transactions, 0), 2) as transactions,
+                -- Calculate future close prices for price_diff
+                any(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 15 FOLLOWING AND 15 FOLLOWING) as future_close,
+                -- Calculate max_price_diff by finding largest movement up or down in next 15 minutes
+                round(if(
+                    abs(((max(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100) >
+                    abs(((min(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100),
+                    ((max(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100,
+                    ((min(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100
+                ), 2) as max_price_diff,
+                -- Calculate daily metrics
+                round(max(high) OVER (PARTITION BY ticker, toDate(timestamp)), 2) as daily_high,
+                round(min(low) OVER (PARTITION BY ticker, toDate(timestamp)), 2) as daily_low,
+                -- Get previous day's close using lagInFrame
+                round(lagInFrame(close) OVER (PARTITION BY ticker ORDER BY toDate(timestamp)), 2) as previous_close
             FROM {db.database}.stock_bars
+            WHERE toDate(timestamp) = '{current_date}'
+            ORDER BY timestamp ASC, ticker ASC
         ),
         indicator_metrics AS (
             SELECT
                 ticker,
                 timestamp,
                 cityHash64(ticker, toString(timestamp)) as uni_id,
-                any(if(indicator_type = 'SMA_5', value, NULL)) AS sma_5,
-                any(if(indicator_type = 'SMA_9', value, NULL)) AS sma_9,
-                any(if(indicator_type = 'SMA_12', value, NULL)) AS sma_12,
-                any(if(indicator_type = 'SMA_20', value, NULL)) AS sma_20,
-                any(if(indicator_type = 'SMA_50', value, NULL)) AS sma_50,
-                any(if(indicator_type = 'SMA_100', value, NULL)) AS sma_100,
-                any(if(indicator_type = 'SMA_200', value, NULL)) AS sma_200,
-                any(if(indicator_type = 'EMA_9', value, NULL)) AS ema_9,
-                any(if(indicator_type = 'EMA_12', value, NULL)) AS ema_12,
-                any(if(indicator_type = 'EMA_20', value, NULL)) AS ema_20,
-                any(if(indicator_type = 'MACD', value, NULL)) AS macd_value,
-                any(if(indicator_type = 'MACD', signal, NULL)) AS macd_signal,
-                any(if(indicator_type = 'MACD', histogram, NULL)) AS macd_histogram,
-                any(if(indicator_type = 'RSI', value, NULL)) AS rsi_14
+                round(coalesce(nullIf(any(if(indicator_type = 'SMA_5', value, NULL)), 0), 2), 2) as sma_5,
+                round(coalesce(nullIf(any(if(indicator_type = 'SMA_9', value, NULL)), 0), 2), 2) as sma_9,
+                round(coalesce(nullIf(any(if(indicator_type = 'SMA_12', value, NULL)), 0), 2), 2) as sma_12,
+                round(coalesce(nullIf(any(if(indicator_type = 'SMA_20', value, NULL)), 0), 2), 2) as sma_20,
+                round(coalesce(nullIf(any(if(indicator_type = 'SMA_50', value, NULL)), 0), 2), 2) as sma_50,
+                round(coalesce(nullIf(any(if(indicator_type = 'SMA_100', value, NULL)), 0), 2), 2) as sma_100,
+                round(coalesce(nullIf(any(if(indicator_type = 'SMA_200', value, NULL)), 0), 2), 2) as sma_200,
+                round(coalesce(nullIf(any(if(indicator_type = 'EMA_9', value, NULL)), 0), 2), 2) as ema_9,
+                round(coalesce(nullIf(any(if(indicator_type = 'EMA_12', value, NULL)), 0), 2), 2) as ema_12,
+                round(coalesce(nullIf(any(if(indicator_type = 'EMA_20', value, NULL)), 0), 2), 2) as ema_20,
+                round(coalesce(nullIf(any(if(indicator_type = 'MACD', value, NULL)), 0), 2), 2) as macd_value,
+                round(coalesce(nullIf(any(if(indicator_type = 'MACD', signal, NULL)), 0), 2), 2) as macd_signal,
+                round(coalesce(nullIf(any(if(indicator_type = 'MACD', histogram, NULL)), 0), 2), 2) as macd_histogram,
+                round(coalesce(nullIf(any(if(indicator_type = 'RSI', value, NULL)), 0), 2), 2) as rsi_14
             FROM {db.database}.stock_indicators
             GROUP BY ticker, timestamp
         )
