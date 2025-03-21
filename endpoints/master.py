@@ -273,7 +273,9 @@ async def populate_master_table(db: ClickHouseDB) -> None:
                     coalesce(nullIf(transactions, 0), 2) as transactions,
                     -- Calculate future close prices for price_diff
                     any(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 15 FOLLOWING AND 15 FOLLOWING) as future_close,
-                    -- Calculate max_price_diff by finding largest movement up or down in next 15 minutes
+                    -- Calculate price_diff using future_close
+                    round(((any(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 15 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100, 2) as price_diff,
+                    -- Calculate max_price_diff
                     round(if(
                         abs(((max(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100) >
                         abs(((min(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100),
@@ -353,6 +355,7 @@ async def populate_master_table(db: ClickHouseDB) -> None:
             )
             
             SELECT
+                b.uni_id,
                 b.ticker,
                 b.timestamp,
                 b.open,
@@ -429,7 +432,7 @@ async def populate_master_table(db: ClickHouseDB) -> None:
             LEFT JOIN quote_metrics q ON b.ticker = q.ticker AND b.timestamp = q.timestamp
             LEFT JOIN trade_metrics t ON b.ticker = t.ticker AND b.timestamp = t.timestamp
             LEFT JOIN indicator_metrics i ON b.ticker = i.ticker AND b.timestamp = i.timestamp
-            ORDER BY b.timestamp ASC, ticker ASC
+            ORDER BY b.timestamp ASC, b.ticker ASC
             """
             
             db.client.command(insert_query)
@@ -464,172 +467,8 @@ async def create_master_table(db: ClickHouseDB) -> None:
             if not db.table_exists(table):
                 raise Exception(f"Source table {table} does not exist. Please create source tables first.")
         
-        # Populate the master table with existing data
-        populate_query = f"""
-        INSERT INTO {db.database}.{config.TABLE_STOCK_MASTER}
-        WITH 
-        minute_quotes AS (
-            SELECT
-                ticker,
-                toStartOfMinute(sip_timestamp) AS timestamp,
-                cityHash64(ticker, toString(toStartOfMinute(sip_timestamp))) as uni_id,
-                avg(bid_price) AS avg_bid_price,
-                avg(ask_price) AS avg_ask_price,
-                min(bid_price) AS min_bid_price,
-                max(ask_price) AS max_ask_price,
-                sum(bid_size) AS total_bid_size,
-                sum(ask_size) AS total_ask_size,
-                count(*) AS quote_count,
-                arrayStringConcat(arrayMap(x -> toString(x), arrayFlatten([coalesce(groupArray(conditions), [])]))) AS quote_conditions,
-                argMax(ask_exchange, sip_timestamp) AS ask_exchange,
-                argMax(bid_exchange, sip_timestamp) AS bid_exchange
-            FROM {db.database}.stock_quotes
-            GROUP BY ticker, timestamp
-        ),
-        minute_trades AS (
-            SELECT
-                ticker,
-                toStartOfMinute(sip_timestamp) AS timestamp,
-                cityHash64(ticker, toString(toStartOfMinute(sip_timestamp))) as uni_id,
-                avg(price) AS avg_trade_price,
-                min(price) AS min_trade_price,
-                max(price) AS max_trade_price,
-                sum(size) AS total_trade_size,
-                count(*) AS trade_count,
-                arrayStringConcat(arrayMap(x -> toString(x), arrayFlatten([coalesce(groupArray(conditions), [])]))) AS trade_conditions,
-                argMax(exchange, sip_timestamp) AS trade_exchange
-            FROM {db.database}.stock_trades
-            GROUP BY ticker, timestamp
-        ),
-        base_data AS (
-            SELECT 
-                ticker,
-                timestamp,
-                cityHash64(ticker, toString(timestamp)) as uni_id,
-                round(open, 2) as open,
-                round(high, 2) as high,
-                round(low, 2) as low,
-                round(close, 2) as close,
-                coalesce(nullIf(volume, 0), 2) as volume,
-                round(coalesce(nullIf(vwap, 0), 2), 2) as vwap,
-                coalesce(nullIf(transactions, 0), 2) as transactions,
-                -- Calculate future close prices for price_diff
-                any(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 15 FOLLOWING AND 15 FOLLOWING) as future_close,
-                -- Calculate max_price_diff by finding largest movement up or down in next 15 minutes
-                round(if(
-                    abs(((max(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100) >
-                    abs(((min(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100),
-                    ((max(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100,
-                    ((min(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100
-                ), 2) as max_price_diff,
-                -- Calculate daily metrics
-                round(max(high) OVER (PARTITION BY ticker, toDate(timestamp)), 2) as daily_high,
-                round(min(low) OVER (PARTITION BY ticker, toDate(timestamp)), 2) as daily_low,
-                -- Get previous day's close using lagInFrame
-                round(lagInFrame(close) OVER (PARTITION BY ticker ORDER BY toDate(timestamp)), 2) as previous_close
-            FROM {db.database}.stock_bars
-            WHERE toDate(timestamp) = '{current_date}'
-            ORDER BY timestamp ASC, ticker ASC
-        ),
-        indicator_metrics AS (
-            SELECT
-                ticker,
-                timestamp,
-                cityHash64(ticker, toString(timestamp)) as uni_id,
-                round(coalesce(nullIf(any(if(indicator_type = 'SMA_5', value, NULL)), 0), 2), 2) as sma_5,
-                round(coalesce(nullIf(any(if(indicator_type = 'SMA_9', value, NULL)), 0), 2), 2) as sma_9,
-                round(coalesce(nullIf(any(if(indicator_type = 'SMA_12', value, NULL)), 0), 2), 2) as sma_12,
-                round(coalesce(nullIf(any(if(indicator_type = 'SMA_20', value, NULL)), 0), 2), 2) as sma_20,
-                round(coalesce(nullIf(any(if(indicator_type = 'SMA_50', value, NULL)), 0), 2), 2) as sma_50,
-                round(coalesce(nullIf(any(if(indicator_type = 'SMA_100', value, NULL)), 0), 2), 2) as sma_100,
-                round(coalesce(nullIf(any(if(indicator_type = 'SMA_200', value, NULL)), 0), 2), 2) as sma_200,
-                round(coalesce(nullIf(any(if(indicator_type = 'EMA_9', value, NULL)), 0), 2), 2) as ema_9,
-                round(coalesce(nullIf(any(if(indicator_type = 'EMA_12', value, NULL)), 0), 2), 2) as ema_12,
-                round(coalesce(nullIf(any(if(indicator_type = 'EMA_20', value, NULL)), 0), 2), 2) as ema_20,
-                round(coalesce(nullIf(any(if(indicator_type = 'MACD', value, NULL)), 0), 2), 2) as macd_value,
-                round(coalesce(nullIf(any(if(indicator_type = 'MACD', signal, NULL)), 0), 2), 2) as macd_signal,
-                round(coalesce(nullIf(any(if(indicator_type = 'MACD', histogram, NULL)), 0), 2), 2) as macd_histogram,
-                round(coalesce(nullIf(any(if(indicator_type = 'RSI', value, NULL)), 0), 2), 2) as rsi_14
-            FROM {db.database}.stock_indicators
-            GROUP BY ticker, timestamp
-        )
-        SELECT
-            b.uni_id,
-            b.ticker,
-            b.timestamp,
-            b.open,
-            b.high,
-            b.low,
-            b.close,
-            b.volume,
-            b.vwap,
-            b.transactions,
-            b.price_diff,
-            b.max_price_diff,
-            multiIf(
-                b.price_diff <= -1, 0,
-                b.price_diff <= -0.5, 1,
-                b.price_diff <= 0, 2,
-                b.price_diff <= 0.5, 3,
-                b.price_diff <= 1, 4,
-                5
-            ) as target,
-            q.avg_bid_price,
-            q.avg_ask_price,
-            q.min_bid_price,
-            q.max_ask_price,
-            q.total_bid_size,
-            q.total_ask_size,
-            q.quote_count,
-            coalesce(q.quote_conditions, '') as quote_conditions,
-            q.ask_exchange,
-            q.bid_exchange,
-            t.avg_trade_price,
-            t.min_trade_price,
-            t.max_trade_price,
-            t.total_trade_size,
-            t.trade_count,
-            coalesce(t.trade_conditions, '') as trade_conditions,
-            t.trade_exchange,
-            i.sma_5,
-            i.sma_9,
-            i.sma_12,
-            i.sma_20,
-            i.sma_50,
-            i.sma_100,
-            i.sma_200,
-            i.ema_9,
-            i.ema_12,
-            i.ema_20,
-            i.macd_value,
-            i.macd_signal,
-            i.macd_histogram,
-            i.rsi_14,
-            b.daily_high,
-            b.daily_low,
-            b.previous_close,
-            b.daily_high - b.daily_low as tr_current,
-            b.daily_high - b.previous_close as tr_high_close,
-            b.daily_low - b.previous_close as tr_low_close,
-            greatest(
-                b.daily_high - b.daily_low,
-                abs(b.daily_high - b.previous_close),
-                abs(b.daily_low - b.previous_close)
-            ) as tr_value,
-            avg(greatest(
-                b.daily_high - b.daily_low,
-                abs(b.daily_high - b.previous_close),
-                abs(b.daily_low - b.previous_close)
-            )) OVER (PARTITION BY b.ticker ORDER BY b.timestamp ROWS BETWEEN 13 PRECEDING AND CURRENT ROW) as atr_value
-        FROM base_data b
-        LEFT JOIN minute_quotes q ON b.ticker = q.ticker AND b.timestamp = q.timestamp
-        LEFT JOIN minute_trades t ON b.ticker = t.ticker AND b.timestamp = t.timestamp
-        LEFT JOIN indicator_metrics i ON b.ticker = i.ticker AND b.timestamp = i.timestamp
-        ORDER BY b.timestamp, b.ticker
-        """
-        
-        db.client.command(populate_query)
-        print("Populated master table with existing data")
+        # After creating the table structure, populate it with data
+        await populate_master_table(db)
         
     except Exception as e:
         print(f"Error creating master table: {str(e)}")
@@ -640,6 +479,8 @@ async def init_master_table(db: ClickHouseDB) -> None:
     Initialize the master stock data table
     """
     try:
+        start_time = datetime.now()
+        
         # Drop existing tables to ensure clean initialization
         print("Dropping existing master tables...")
         db.client.command(f"DROP TABLE IF EXISTS {db.database}.stock_normalized")
@@ -648,15 +489,20 @@ async def init_master_table(db: ClickHouseDB) -> None:
         
         # Create master table
         print("\nCreating master table...")
+        master_start = datetime.now()
         await create_master_table(db)
-        print("Master table created successfully")
+        master_time = datetime.now() - master_start
+        print(f"Master table created successfully (took {master_time})")
         
         # Create normalized table
         print("\nCreating normalized table...")
+        norm_start = datetime.now()
         await create_normalized_table(db)
-        print("Normalized table created successfully")
+        norm_time = datetime.now() - norm_start
+        print(f"Normalized table created successfully (took {norm_time})")
         
-        print("\nMaster table initialization complete!")
+        total_time = datetime.now() - start_time
+        print(f"\nMaster table initialization complete! Total time: {total_time}")
         
     except Exception as e:
         print(f"Error initializing master table: {str(e)}")

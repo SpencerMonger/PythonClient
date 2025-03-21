@@ -90,10 +90,10 @@ async def run_live_data() -> None:
                 # Get current time in Eastern Time
                 now = datetime.now(et_tz)
                 
-                # Calculate time until next run (10 seconds past the next minute)
+                # Calculate time until next run (5 seconds past the next minute)
                 current_minute = now.replace(second=0, microsecond=0)
                 next_minute = current_minute + timedelta(minutes=1)
-                target_time = next_minute.replace(second=10)
+                target_time = next_minute.replace(second=5)
                 
                 # Calculate wait time until target time
                 wait_time = (target_time - now).total_seconds()
@@ -135,7 +135,7 @@ async def run_live_data() -> None:
                     
             except Exception as e:
                 print(f"Error in processing cycle: {str(e)}")
-                # Wait until the next minute + 10 seconds before retrying
+                # Wait until the next minute + 5 seconds before retrying
                 await asyncio.sleep(60)
                 
     except KeyboardInterrupt:
