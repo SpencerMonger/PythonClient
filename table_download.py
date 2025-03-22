@@ -1,6 +1,7 @@
 import os
 import asyncio
 import pandas as pd
+from datetime import datetime
 from clickhouse_driver import Client
 from endpoints.db import ClickHouseDB
 from endpoints import config
@@ -22,6 +23,7 @@ async def download_normalized_table(db: ClickHouseDB, output_dir: str) -> None:
         # Query to get all data from stock_normalized table with explicit column names
         query = f"""
         SELECT
+            uni_id,
             ticker,
             timestamp,
             target,
@@ -86,7 +88,7 @@ async def download_normalized_table(db: ClickHouseDB, output_dir: str) -> None:
         df = pd.DataFrame(
             result.result_rows,
             columns=[
-                'ticker', 'timestamp', 'target', 'quote_conditions', 'trade_conditions',
+                'uni_id', 'ticker', 'timestamp', 'target', 'quote_conditions', 'trade_conditions',
                 'ask_exchange', 'bid_exchange', 'trade_exchange', 'open', 'high', 'low',
                 'close', 'volume', 'vwap', 'transactions', 'price_diff', 'max_price_diff',
                 'avg_bid_price', 'avg_ask_price', 'min_bid_price', 'max_ask_price',
@@ -99,8 +101,9 @@ async def download_normalized_table(db: ClickHouseDB, output_dir: str) -> None:
             ]
         )
         
-        # Save as parquet file
-        output_file = os.path.join(output_dir, "stock_normalized.parquet")
+        # Save as parquet file with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_file = os.path.join(output_dir, f"stock_normalized_{timestamp}.parquet")
         print(f"Saving to {output_file}...")
         df.to_parquet(output_file, index=False)
         
