@@ -39,12 +39,13 @@ async def fetch_bars(ticker: str, from_date: datetime, to_date: datetime) -> Lis
     
     if is_live_mode:
         print(f"Detected live mode (time range: {time_diff} minutes)")
-        # For live mode, specifically get yesterday and today to avoid excessive fetching
+        # For live mode, specifically get a bit more than yesterday and today to ensure we get full data
+        # The API sometimes returns dates with an offset, so we need to be more generous
         today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        yesterday = today - timedelta(days=1)
-        from_date = yesterday
+        three_days_ago = today - timedelta(days=3)
+        from_date = three_days_ago
         to_date = today + timedelta(days=1)  # Include the whole current day
-        print(f"Adjusted date range for daily bars: {from_date.strftime('%Y-%m-%d')} to {to_date.strftime('%Y-%m-%d')} (yesterday and today only)")
+        print(f"Adjusted date range for daily bars: {from_date.strftime('%Y-%m-%d')} to {to_date.strftime('%Y-%m-%d')} (including recent days)")
     
     # Format dates as YYYY-MM-DD
     from_str = from_date.strftime("%Y-%m-%d")
@@ -94,6 +95,21 @@ async def fetch_bars(ticker: str, from_date: datetime, to_date: datetime) -> Lis
         print(f"Processed {bar_count} daily bars")    
         if bars:
             print(f"Date range of bars: {bars[0]['timestamp']} to {bars[-1]['timestamp']}")
+            
+            # Filter to only keep yesterday and today for live mode
+            if is_live_mode:
+                today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).date()
+                yesterday = today - timedelta(days=1)
+                
+                # Keep only bars from yesterday and today
+                filtered_bars = []
+                for bar in bars:
+                    bar_date = bar['timestamp'].date()
+                    if bar_date in (yesterday, today):
+                        filtered_bars.append(bar)
+                
+                print(f"Filtered from {len(bars)} bars to {len(filtered_bars)} bars (yesterday and today only)")
+                bars = filtered_bars
             
     except Exception as e:
         print(f"Error fetching daily bars for {ticker}: {str(e)}")
@@ -182,26 +198,35 @@ async def store_bars(db: ClickHouseDB, bars: List[Dict], mode: str = "historical
             print(f"Dropped temporary table {temp_table_name}")
         
         # Verify there are no duplicates after the operation
-        verify_query = f"""
-            SELECT 
-                ticker, 
-                toDate(timestamp) as date, 
-                count(*) as count
-            FROM {db.database}.{config.TABLE_STOCK_DAILY}
-            WHERE ticker IN ({ticker_list})
-            AND toDate(timestamp) IN ({date_list})
-            GROUP BY ticker, date
-            HAVING count > 1
-            LIMIT 10
-        """
-        
-        verify_result = db.client.command(verify_query)
-        if verify_result:
-            print("WARNING: Duplicates still exist after operation:")
-            for row in verify_result:
-                print(f"  - {row['ticker']} on {row['date']}: {row['count']} records")
-        else:
-            print("No duplicates found after operation - data is clean")
+        try:
+            verify_query = f"""
+                SELECT 
+                    ticker, 
+                    toDate(timestamp) as date, 
+                    count(*) as count
+                FROM {db.database}.{config.TABLE_STOCK_DAILY}
+                WHERE ticker IN ({ticker_list})
+                AND toDate(timestamp) IN ({date_list})
+                GROUP BY ticker, date
+                HAVING count > 1
+                LIMIT 10
+            """
+            
+            # Use query method instead of command for better result handling
+            verify_result = db.client.query(verify_query)
+            
+            # Check if there are any rows in the result
+            if verify_result.result_rows:
+                print("WARNING: Duplicates still exist after operation:")
+                for row in verify_result.result_rows:
+                    # Access columns by index: ticker at 0, date at 1, count at 2
+                    print(f"  - {row[0]} on {row[1]}: {row[2]} records")
+            else:
+                print("No duplicates found after operation - data is clean")
+                
+        except Exception as e:
+            print(f"Error verifying duplicates: {str(e)}")
+            print(f"Error type: {type(e)}")
             
     except Exception as e:
         print(f"Error storing daily bars: {str(e)}")
