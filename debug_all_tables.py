@@ -375,7 +375,7 @@ def analyze_all_tables():
         'stock_indicators',
         'stock_master',
         'stock_normalized',
-        'stock_news'
+        'stock_predictions'
     ]
     
     print("\nClickHouse Database Table Analysis")

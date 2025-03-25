@@ -8,7 +8,7 @@ from endpoints.db import ClickHouseDB
 from endpoints import config
 from endpoints.main_run import run_data_collection, tickers
 from endpoints.model_feed import run_model_feed
-from endpoints.master_tables import master_v2
+from endpoints import master_v2
 
 def is_market_open() -> bool:
     """
@@ -133,15 +133,34 @@ async def run_live_data() -> None:
                 # Update master tables with latest data
                 db = ClickHouseDB()
                 try:
-                    print("\nUpdating master tables with latest data...")
+                    print("\n=== Updating master tables with latest data ===")
+                    print(f"Time range: {last_minute_start.strftime('%Y-%m-%d %H:%M:%S')} - {last_minute_end.strftime('%Y-%m-%d %H:%M:%S')} ET")
+                    
+                    # First, check if the tables exist
+                    master_exists = db.table_exists(config.TABLE_STOCK_MASTER)
+                    normalized_exists = db.table_exists(config.TABLE_STOCK_NORMALIZED)
+                    
+                    if not master_exists or not normalized_exists:
+                        print("Master and/or normalized tables don't exist, initializing them first...")
+                        await master_v2.init_master_v2(db)
+                    
+                    # Now update the tables with latest data
                     await master_v2.insert_latest_data(db, last_minute_start, last_minute_end)
                     print("Master tables updated successfully")
+                except Exception as e:
+                    print(f"Warning: Error updating master tables: {str(e)}")
+                    print("Continuing with execution despite master table update error")
                 finally:
                     db.close()
                 
                 # Run model feed after data collection
-                print("\nTriggering model predictions...")
-                await run_model_feed()
+                print("\n=== Triggering model predictions ===")
+                try:
+                    await run_model_feed()
+                    print("Model predictions completed successfully")
+                except Exception as e:
+                    print(f"Warning: Error in model predictions: {str(e)}")
+                    print("Continuing with execution despite prediction error")
                     
             except Exception as e:
                 print(f"Error in processing cycle: {str(e)}")

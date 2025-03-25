@@ -326,6 +326,25 @@ class ClickHouseDB:
                     ORDER BY (timestamp, ticker)
                     SETTINGS index_granularity = 8192
                     """
+                elif table_name == config.TABLE_STOCK_PREDICTIONS:
+                    # For predictions table, use ReplacingMergeTree engine with uni_id as part of the key
+                    if timestamp_col:
+                        ordered_schema[timestamp_col] = schema.pop(timestamp_col)
+                    if 'ticker' in schema:
+                        ordered_schema['ticker'] = schema.pop('ticker')
+                    if 'uni_id' in schema:
+                        ordered_schema['uni_id'] = schema.pop('uni_id')
+                    ordered_schema.update(schema)
+                    
+                    columns_def = ", ".join(f"{col} {type_}" for col, type_ in ordered_schema.items())
+                    query = f"""
+                    CREATE TABLE IF NOT EXISTS {self.database}.{table_name} (
+                        {columns_def}
+                    ) ENGINE = ReplacingMergeTree()
+                    PRIMARY KEY (timestamp, ticker, uni_id)
+                    ORDER BY (timestamp, ticker, uni_id)
+                    SETTINGS index_granularity = 8192
+                    """
                 else:
                     # For all other tables, enforce timestamp/ticker ordering
                     if timestamp_col:

@@ -57,8 +57,7 @@ class ModelPredictor:
         }
         
         print("\nInitializing predictions table...")
-        # Drop existing table first
-        self.db.drop_table_if_exists(config.TABLE_STOCK_PREDICTIONS)
+        # Only create the table if it doesn't exist
         self.db.create_table_if_not_exists(config.TABLE_STOCK_PREDICTIONS, schema)
         
     async def get_latest_normalized_data(self) -> pd.DataFrame:
@@ -147,6 +146,18 @@ class ModelPredictor:
             
         print("\nStoring prediction in database...")
         try:
+            # Generate a unique ID for the prediction based on timestamp, ticker, and prediction_time
+            timestamp_str = prediction['timestamp'].isoformat() if hasattr(prediction['timestamp'], 'isoformat') else str(prediction['timestamp'])
+            prediction_time_str = prediction['prediction_time'].isoformat() if hasattr(prediction['prediction_time'], 'isoformat') else str(prediction['prediction_time'])
+            
+            # Add uni_id to make each prediction unique using the ClickHouseDB's consistent hash method
+            prediction['uni_id'] = self.db._generate_consistent_hash(
+                prediction['ticker'], 
+                timestamp_str,
+                prediction_time_str,
+                prediction['predicted_value']
+            )
+            
             await self.db.insert_data(config.TABLE_STOCK_PREDICTIONS, [prediction])
             print("Successfully stored prediction")
             

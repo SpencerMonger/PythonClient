@@ -29,10 +29,12 @@ async def init_master_only(db: ClickHouseDB, from_date: datetime = None, to_date
         print("\nInitializing master table...")
         start_time = time.time()
         if store_latest_only and from_date and to_date:
-            # For live mode, only insert latest data
+            # For live mode, only insert latest data using master_v2
+            print(f"Live mode: Using master_v2 to update data from {from_date.strftime('%Y-%m-%d %H:%M')} to {to_date.strftime('%Y-%m-%d %H:%M')}")
             await master_v2.insert_latest_data(db, from_date, to_date)
         else:
-            # For historical mode, do full initialization
+            # For historical mode, do full initialization with master.py
+            print("Historical mode: Using master.py for full table initialization")
             await master.init_master_table(db)
         print(f"Master table initialized successfully in {time.time() - start_time:.2f} seconds")
     except Exception as e:
