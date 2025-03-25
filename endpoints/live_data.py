@@ -8,6 +8,7 @@ from endpoints.db import ClickHouseDB
 from endpoints import config
 from endpoints.main_run import run_data_collection, tickers
 from endpoints.model_feed import run_model_feed
+from endpoints.master_tables import master_v2
 
 def is_market_open() -> bool:
     """
@@ -128,6 +129,15 @@ async def run_live_data() -> None:
                     from_date=last_minute_start,
                     to_date=last_minute_end
                 )
+                
+                # Update master tables with latest data
+                db = ClickHouseDB()
+                try:
+                    print("\nUpdating master tables with latest data...")
+                    await master_v2.insert_latest_data(db, last_minute_start, last_minute_end)
+                    print("Master tables updated successfully")
+                finally:
+                    db.close()
                 
                 # Run model feed after data collection
                 print("\nTriggering model predictions...")

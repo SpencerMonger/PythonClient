@@ -52,10 +52,13 @@ class ModelPredictor:
             'ticker': 'String',
             'predicted_value': 'Float64',
             'actual_close': 'Float64',
-            'prediction_time': 'DateTime'
+            'prediction_time': 'DateTime',
+            'uni_id': 'UInt64'
         }
         
         print("\nInitializing predictions table...")
+        # Drop existing table first
+        self.db.drop_table_if_exists(config.TABLE_STOCK_PREDICTIONS)
         self.db.create_table_if_not_exists(config.TABLE_STOCK_PREDICTIONS, schema)
         
     async def get_latest_normalized_data(self) -> pd.DataFrame:
@@ -75,7 +78,9 @@ class ModelPredictor:
                 return None
                 
             df = pd.DataFrame(result.result_rows, columns=result.column_names)
-            print(f"Retrieved data for timestamp: {df['timestamp'].iloc[0]}")
+            latest_timestamp = df['timestamp'].iloc[0]
+            print(f"Retrieved data for timestamp: {latest_timestamp}")
+            print(f"Data age: {datetime.now() - latest_timestamp}")
             return df
             
         except Exception as e:

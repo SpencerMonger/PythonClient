@@ -5,7 +5,7 @@ from typing import List
 import pytz
 
 from endpoints.db import ClickHouseDB
-from endpoints import bars, trades, quotes, news, indicators, master, bars_daily
+from endpoints import bars, trades, quotes, news, indicators, master, bars_daily, master_v2
 
 async def init_tables(db: ClickHouseDB) -> None:
     """
@@ -21,14 +21,19 @@ async def init_tables(db: ClickHouseDB) -> None:
     await indicators.init_indicators_table(db)
     print(f"Table initialization completed in {time.time() - start_time:.2f} seconds")
 
-async def init_master_only(db: ClickHouseDB) -> None:
+async def init_master_only(db: ClickHouseDB, from_date: datetime = None, to_date: datetime = None, store_latest_only: bool = False) -> None:
     """
     Initialize only the master table, assuming other tables already exist
     """
     try:
         print("\nInitializing master table...")
         start_time = time.time()
-        await master.init_master_table(db)
+        if store_latest_only and from_date and to_date:
+            # For live mode, only insert latest data
+            await master_v2.insert_latest_data(db, from_date, to_date)
+        else:
+            # For historical mode, do full initialization
+            await master.init_master_table(db)
         print(f"Master table initialized successfully in {time.time() - start_time:.2f} seconds")
     except Exception as e:
         print(f"Error initializing master table: {str(e)}")
@@ -273,17 +278,21 @@ async def main(tickers: List[str], from_date: datetime, to_date: datetime, store
         for ticker in tickers:
             print(f"\n{'='*50}")
             print(f"Processing {ticker}...")
-            print(f"Time range: {from_date.strftime('%Y-%m-%d')} to {to_date.strftime('%Y-%m-%d')}")
+            print(f"Time range: {from_date.strftime('%Y-%m-%d %H:%M:%S')} to {to_date.strftime('%Y-%m-%d %H:%M:%S')}")
             start_time = time.time()
             await process_ticker(db, ticker, from_date, to_date, store_latest_only)
             print(f"Finished processing {ticker} in {time.time() - start_time:.2f} seconds")
             print('='*50)
             
-        # Initialize master table after all data is fetched
-        print("\nInitializing master table...")
-        start_time = time.time()
-        await init_master_only(db)
-        print(f"Master table initialized successfully in {time.time() - start_time:.2f} seconds")
+        # For live mode, we don't need to reinitialize the entire master table
+        if store_latest_only:
+            print("\nSkipping full master table initialization in live mode...")
+        else:
+            # Initialize master table after all data is fetched (historical mode)
+            print("\nInitializing master table...")
+            start_time = time.time()
+            await init_master_only(db, from_date, to_date, store_latest_only)
+            print(f"Master table initialized successfully in {time.time() - start_time:.2f} seconds")
         
         print(f"\nTotal execution time: {time.time() - total_start_time:.2f} seconds")
             

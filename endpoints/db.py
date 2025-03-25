@@ -107,16 +107,7 @@ class ClickHouseDB:
                             # Generate consistent hash using dedicated method
                             ticker = str(row.get('ticker', ''))
                             indicator_type = str(row.get('indicator_type', ''))
-                            # Only print debug info for 10 random rows
-                            if i % max(1, len(data) // 10) == 0:
-                                print(f"\nDebug - Indicator Hash Inputs:")
-                                print(f"Ticker: {ticker}")
-                                print(f"Timestamp: {timestamp}")
-                                print(f"Timestamp String: {timestamp_str}")
-                                print(f"Indicator Type: {indicator_type}")
                             row['uni_id'] = self._generate_consistent_hash(ticker, timestamp_str, indicator_type)
-                            if i % max(1, len(data) // 10) == 0:
-                                print(f"Generated Hash: {row['uni_id']}")
                         except Exception as e:
                             print(f"Error generating uni_id for indicators: {str(e)}")
                             row['uni_id'] = 0  # Fallback value
@@ -133,15 +124,7 @@ class ClickHouseDB:
                             
                             # Generate consistent hash using dedicated method
                             ticker = str(row.get('ticker', ''))
-                            # Only print debug info for 10 random rows
-                            if i % max(1, len(data) // 10) == 0:
-                                print(f"\nDebug - Regular Table Hash Inputs:")
-                                print(f"Ticker: {ticker}")
-                                print(f"Timestamp: {main_timestamp}")
-                                print(f"Timestamp String: {timestamp_str}")
                             row['uni_id'] = self._generate_consistent_hash(ticker, timestamp_str)
-                            if i % max(1, len(data) // 10) == 0:
-                                print(f"Generated Hash: {row['uni_id']}")
                         except Exception as e:
                             print(f"Error generating uni_id: {str(e)}")
                             row['uni_id'] = 0  # Fallback value
@@ -250,6 +233,8 @@ class ClickHouseDB:
         except Exception as e:
             if "Table" in str(e) and "doesn't exist" in str(e):
                 return False
+            if "Unknown table expression identifier" in str(e):
+                return False
             print(f"Error checking table existence: {str(e)}")
             return False
 
@@ -305,6 +290,40 @@ class ClickHouseDB:
                     ) ENGINE = MergeTree()
                     PRIMARY KEY (timestamp, ticker, indicator_type)
                     ORDER BY (timestamp, ticker, indicator_type)
+                    SETTINGS index_granularity = 8192
+                    """
+                elif table_name == config.TABLE_STOCK_MASTER:
+                    # For master table, use ReplacingMergeTree engine
+                    if timestamp_col:
+                        ordered_schema[timestamp_col] = schema.pop(timestamp_col)
+                    if 'ticker' in schema:
+                        ordered_schema['ticker'] = schema.pop('ticker')
+                    ordered_schema.update(schema)
+                    
+                    columns_def = ", ".join(f"{col} {type_}" for col, type_ in ordered_schema.items())
+                    query = f"""
+                    CREATE TABLE IF NOT EXISTS {self.database}.{table_name} (
+                        {columns_def}
+                    ) ENGINE = ReplacingMergeTree()
+                    PRIMARY KEY (timestamp, ticker)
+                    ORDER BY (timestamp, ticker)
+                    SETTINGS index_granularity = 8192
+                    """
+                elif table_name == config.TABLE_STOCK_NORMALIZED:
+                    # For normalized table, use ReplacingMergeTree engine
+                    if timestamp_col:
+                        ordered_schema[timestamp_col] = schema.pop(timestamp_col)
+                    if 'ticker' in schema:
+                        ordered_schema['ticker'] = schema.pop('ticker')
+                    ordered_schema.update(schema)
+                    
+                    columns_def = ", ".join(f"{col} {type_}" for col, type_ in ordered_schema.items())
+                    query = f"""
+                    CREATE TABLE IF NOT EXISTS {self.database}.{table_name} (
+                        {columns_def}
+                    ) ENGINE = ReplacingMergeTree()
+                    PRIMARY KEY (timestamp, ticker)
+                    ORDER BY (timestamp, ticker)
                     SETTINGS index_granularity = 8192
                     """
                 else:
