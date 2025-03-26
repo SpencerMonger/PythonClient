@@ -6,11 +6,12 @@ This module extracts the process_ticker function from main.py to ensure consiste
 import asyncio
 import time
 from datetime import datetime, timedelta
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import pytz
 
 from endpoints.db import ClickHouseDB
 from endpoints import bars, trades, quotes, news, indicators, bars_daily
+from endpoints.polygon_client import close_session
 
 async def process_ticker_with_connection(ticker: str, from_date: datetime, to_date: datetime, store_latest_only: bool = False) -> None:
     """
@@ -54,188 +55,137 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
     try:
         ticker_start_time = time.time()
         
-        # Fetch and store bar data
-        print(f"\nFetching bar data for {ticker}...")
-        fetch_start_time = time.time()
-        bar_data = await bars.fetch_bars(ticker, from_date, to_date)
-        fetch_time = time.time() - fetch_start_time
-        
-        if bar_data:
-            print(f"Found {len(bar_data)} bars (fetched in {fetch_time:.2f} seconds)")
-            print("Storing bar data...")
-            
-            store_start_time = time.time()
-            # If store_latest_only is True, only store the most recent bar
-            if store_latest_only and bar_data:
-                bar_data = [bar_data[-1]]  # Keep only the last bar
-                
-            await bars.store_bars(db, bar_data)
-            store_time = time.time() - store_start_time
-            print(f"Bar data stored successfully in {store_time:.2f} seconds")
-        else:
-            print(f"No bar data found (checked in {fetch_time:.2f} seconds)")
-        
-        # Fetch and store daily bar data
-        print(f"\nFetching daily bar data for {ticker}...")
-        daily_start_time = time.time()
-        daily_bar_data = await bars_daily.fetch_bars(ticker, from_date, to_date)
-        daily_fetch_time = time.time() - daily_start_time
-        
-        if daily_bar_data:
-            print(f"Found {len(daily_bar_data)} daily bars (fetched in {daily_fetch_time:.2f} seconds)")
-            print("Storing daily bar data...")
-            store_start_time = time.time()
-            # If store_latest_only is True, only store the most recent daily bar
-            if store_latest_only and daily_bar_data:
-                daily_bar_data = [daily_bar_data[-1]]
-                
-            await bars_daily.store_bars(db, daily_bar_data, "live" if store_latest_only else "historical")
-            print(f"Daily bar data stored successfully in {time.time() - store_start_time:.2f} seconds")
-        else:
-            print(f"No daily bar data found (checked in {daily_fetch_time:.2f} seconds)")
-        
-        # Fetch and store trade data
-        print(f"\nFetching trade data for {ticker}...")
-        trade_start_time = time.time()
-        
-        # Ensure dates are timezone-aware
+        # For live mode, adjust to last minute for trades and quotes
         et_tz = pytz.timezone('US/Eastern')
         trade_from = from_date if from_date.tzinfo is not None else et_tz.localize(from_date)
         trade_to = to_date if to_date.tzinfo is not None else et_tz.localize(to_date)
         
-        # For live mode, adjust to last minute
         if store_latest_only:
             trade_from = datetime(trade_to.year, trade_to.month, trade_to.day, 
                                 trade_to.hour, trade_to.minute, 0, 
                                 tzinfo=trade_to.tzinfo)
             trade_to = trade_from + timedelta(minutes=1)
-            
+        
+        # Create tasks for all data fetching operations to run in parallel
+        # Focus on bars and trades which are the most important for live mode
+        fetch_tasks = {
+            'bars': asyncio.create_task(asyncio.wait_for(
+                bars.fetch_bars(ticker, from_date, to_date),
+                timeout=3.0  # 3 second timeout
+            )),
+            'trades': asyncio.create_task(asyncio.wait_for(
+                trades.fetch_trades(ticker, trade_from, trade_to),
+                timeout=3.0  # 3 second timeout
+            )),
+            'quotes': asyncio.create_task(asyncio.wait_for(
+                quotes.fetch_quotes(ticker, trade_from, trade_to),
+                timeout=3.0  # 3 second timeout
+            ))
+        }
+        
+        # Create less critical tasks with lower priority
+        if not store_latest_only:  # Historical mode loads all data
+            fetch_tasks['daily_bars'] = asyncio.create_task(asyncio.wait_for(
+                bars_daily.fetch_bars(ticker, from_date, to_date),
+                timeout=3.0
+            ))
+            fetch_tasks['news'] = asyncio.create_task(asyncio.wait_for(
+                news.fetch_news(ticker, from_date, to_date),
+                timeout=2.0
+            ))
+            fetch_tasks['indicators'] = asyncio.create_task(asyncio.wait_for(
+                indicators.fetch_all_indicators(ticker, from_date, to_date),
+                timeout=2.0
+            ))
+        
+        # Process and store critical data first - SEQUENTIALLY to avoid concurrent DB access errors
+        # Each store operation gets its own database connection
         try:
-            # Process trades in smaller time chunks to avoid memory issues
-            chunk_size = timedelta(days=1)  # Process 24 hours at a time
-            current_from = trade_from
-            total_trades = 0
-            first_chunk = True  # Flag to print sample data only for first chunk
-            
-            while current_from < trade_to:
-                current_to = min(current_from + chunk_size, trade_to)
-                print(f"Fetching trades for {ticker} from {current_from.strftime('%H:%M:%S')} to {current_to.strftime('%H:%M:%S')} ET...")
-                
-                chunk_start_time = time.time()
-                chunk_trades = await trades.fetch_trades(ticker, current_from, current_to)
-                chunk_fetch_time = time.time() - chunk_start_time
-                
-                if chunk_trades:
-                    total_trades += len(chunk_trades)
-                    print(f"Found {len(chunk_trades)} trades in current chunk (fetched in {chunk_fetch_time:.2f} seconds)")
-                    print("Storing trade chunk...")
-                    
-                    store_start_time = time.time()
-                    await trades.store_trades(db, chunk_trades)
-                    store_time = time.time() - store_start_time
-                    print(f"Trade chunk stored successfully in {store_time:.2f} seconds")
-                
-                current_from = current_to
-            
-            trade_fetch_time = time.time() - trade_start_time
-            if total_trades > 0:
-                print(f"Successfully processed {total_trades} total trades in {trade_fetch_time:.2f} seconds")
-            else:
-                print(f"No trade data found (checked in {trade_fetch_time:.2f} seconds)")
-                
-        except Exception as e:
-            print(f"Error fetching trades for {ticker}: {str(e)}")
-            print(f"No trade data found (checked in {time.time() - trade_start_time:.2f} seconds)")
-        
-        # Fetch and store quote data
-        print(f"\nFetching quote data for {ticker}...")
-        quote_start_time = time.time()
-        
-        # Use the same time range as trades
-        quote_from = trade_from
-        quote_to = trade_to
+            bar_data = await fetch_tasks['bars']
+            if bar_data:
+                if store_latest_only and bar_data:
+                    bar_data = [bar_data[-1]]  # Keep only the last bar
+                # Create a dedicated connection for this operation
+                bar_db = ClickHouseDB()
+                try:
+                    await bars.store_bars(bar_db, bar_data)
+                finally:
+                    bar_db.close()
+        except (asyncio.TimeoutError, Exception) as e:
+            print(f"Error with bars for {ticker}: {type(e).__name__}")
         
         try:
-            # Process quotes in smaller time chunks to avoid memory issues
-            chunk_size = timedelta(days=1)  # Process 24 hours at a time
-            current_from = quote_from
-            total_quotes = 0
-            first_chunk = True  # Flag to print sample data only for first chunk
+            trade_data = await fetch_tasks['trades']
+            if trade_data:
+                # Create a dedicated connection for this operation
+                trade_db = ClickHouseDB()
+                try:
+                    await trades.store_trades(trade_db, trade_data)
+                finally:
+                    trade_db.close()
+        except (asyncio.TimeoutError, Exception) as e:
+            print(f"Error with trades for {ticker}: {type(e).__name__}")
+        
+        try:
+            quote_data = await fetch_tasks['quotes']
+            if quote_data:
+                # Create a dedicated connection for this operation
+                quote_db = ClickHouseDB()
+                try:
+                    await quotes.store_quotes(quote_db, quote_data)
+                finally:
+                    quote_db.close()
+        except (asyncio.TimeoutError, Exception) as e:
+            print(f"Error with quotes for {ticker}: {type(e).__name__}")
+        
+        # Only process less critical data if we're not in live mode
+        if not store_latest_only:
+            try:
+                daily_bar_data = await fetch_tasks['daily_bars']
+                if daily_bar_data:
+                    # Create a dedicated connection for this operation
+                    daily_db = ClickHouseDB()
+                    try:
+                        await bars_daily.store_bars(daily_db, daily_bar_data, "historical")
+                    finally:
+                        daily_db.close()
+            except (asyncio.TimeoutError, Exception) as e:
+                print(f"Error with daily bars for {ticker}: {type(e).__name__}")
             
-            while current_from < quote_to:
-                current_to = min(current_from + chunk_size, quote_to)
-                print(f"Fetching quotes for {ticker} from {current_from.strftime('%H:%M:%S')} to {current_to.strftime('%H:%M:%S')} ET...")
-                
-                chunk_start_time = time.time()
-                chunk_quotes = await quotes.fetch_quotes(ticker, current_from, current_to)
-                chunk_fetch_time = time.time() - chunk_start_time
-                
-                if chunk_quotes:
-                    total_quotes += len(chunk_quotes)
-                    print(f"Found {len(chunk_quotes)} quotes in current chunk (fetched in {chunk_fetch_time:.2f} seconds)")
-                    print("Storing quote chunk...")
+            try:
+                news_data = await fetch_tasks['news']
+                if news_data:
+                    # Create a dedicated connection for this operation
+                    news_db = ClickHouseDB()
+                    try:
+                        await news.store_news(news_db, news_data)
+                    finally:
+                        news_db.close()
+            except (asyncio.TimeoutError, Exception) as e:
+                print(f"Error with news for {ticker}: {type(e).__name__}")
+            
+            try:
+                indicator_data = await fetch_tasks['indicators']
+                if indicator_data:
+                    # Group by indicator type and keep latest for each
+                    latest_indicators = {}
+                    for indicator in indicator_data:
+                        indicator_type = indicator['indicator_type']
+                        if indicator_type not in latest_indicators or indicator['timestamp'] > latest_indicators[indicator_type]['timestamp']:
+                            latest_indicators[indicator_type] = indicator
+                    indicator_data = list(latest_indicators.values())
                     
-                    store_start_time = time.time()
-                    await quotes.store_quotes(db, chunk_quotes)
-                    store_time = time.time() - store_start_time
-                    print(f"Quote chunk stored successfully in {store_time:.2f} seconds")
-                
-                current_from = current_to
-            
-            quote_fetch_time = time.time() - quote_start_time
-            if total_quotes > 0:
-                print(f"Successfully processed {total_quotes} total quotes in {quote_fetch_time:.2f} seconds")
-            else:
-                print(f"No quote data found (checked in {quote_fetch_time:.2f} seconds)")
-                
-        except Exception as e:
-            print(f"Error fetching quotes for {ticker}: {str(e)}")
-            print(f"No quote data found (checked in {time.time() - quote_start_time:.2f} seconds)")
+                    # Create a dedicated connection for this operation
+                    indicators_db = ClickHouseDB()
+                    try:
+                        await indicators.store_indicators(indicators_db, indicator_data)
+                    finally:
+                        indicators_db.close()
+            except (asyncio.TimeoutError, Exception) as e:
+                print(f"Error with indicators for {ticker}: {type(e).__name__}")
         
-        # Fetch and store news data
-        print(f"\nFetching news data for {ticker}...")
-        start_time = time.time()
-        news_data = await news.fetch_news(ticker, from_date, to_date)
-        fetch_time = time.time() - start_time
-        if news_data:
-            print(f"Found {len(news_data)} news items (fetched in {fetch_time:.2f} seconds)")
-            print("Storing news data...")
-            start_time = time.time()
-            # If store_latest_only is True, only store the most recent news
-            if store_latest_only and news_data:
-                news_data = [news_data[-1]]
-                
-            await news.store_news(db, news_data)
-            print(f"News data stored successfully in {time.time() - start_time:.2f} seconds")
-        else:
-            print(f"No news data found (checked in {fetch_time:.2f} seconds)")
+        print(f"Processed {ticker} in {time.time() - ticker_start_time:.2f}s")
         
-        # Fetch and store technical indicators
-        print(f"\nFetching technical indicators for {ticker}...")
-        start_time = time.time()
-        indicator_data = await indicators.fetch_all_indicators(ticker, from_date, to_date)
-        fetch_time = time.time() - start_time
-        if indicator_data:
-            print(f"Found {len(indicator_data)} indicators (fetched in {fetch_time:.2f} seconds)")
-            print("Storing indicator data...")
-            start_time = time.time()
-            # If store_latest_only is True, only store the most recent indicators
-            if store_latest_only and indicator_data:
-                # Group by indicator type and keep latest for each
-                latest_indicators = {}
-                for indicator in indicator_data:
-                    indicator_type = indicator['indicator_type']
-                    if indicator_type not in latest_indicators or indicator['timestamp'] > latest_indicators[indicator_type]['timestamp']:
-                        latest_indicators[indicator_type] = indicator
-                indicator_data = list(latest_indicators.values())
-                
-            await indicators.store_indicators(db, indicator_data)
-            print(f"Indicator data stored successfully in {time.time() - start_time:.2f} seconds")
-        else:
-            print(f"No indicator data found (checked in {fetch_time:.2f} seconds)")
-            
-        print(f"\nTotal processing time for {ticker}: {time.time() - ticker_start_time:.2f} seconds")
-            
     except Exception as e:
         print(f"Error processing {ticker}: {str(e)}")
-        raise e 
+        # Don't raise to continue with other tickers 

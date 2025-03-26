@@ -23,6 +23,8 @@ async def run_data_collection(mode: str = "historical", store_latest_only: bool 
         from_date: Optional start date (used in live mode)
         to_date: Optional end date (used in live mode)
     """
+    start_time = time.time()
+    
     if mode == "historical":
         print(f"\nStarting {mode} data processing at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         # For historical mode, use provided dates or defaults
@@ -45,8 +47,33 @@ async def run_data_collection(mode: str = "historical", store_latest_only: bool 
             
         print(f"Processing {len(tickers)} tickers concurrently for {from_date.strftime('%H:%M:00')} - {to_date.strftime('%H:%M:00')} ET")
     
-    # Run main data collection with concurrent ticker processing
-    await main(tickers, from_date, to_date, store_latest_only)
+    try:
+        # In live mode, we need to be even more aggressive with timeouts
+        # Set a stricter timeout for data collection
+        timeout = 5.0 if mode == "live" else 600.0
+        
+        try:
+            # Run main data collection with concurrent ticker processing and a timeout
+            await asyncio.wait_for(
+                main(tickers, from_date, to_date, store_latest_only),
+                timeout=timeout
+            )
+            
+            elapsed = time.time() - start_time
+            print(f"Data collection completed in {elapsed:.2f} seconds")
+        except asyncio.TimeoutError:
+            elapsed = time.time() - start_time
+            print(f"Data collection timed out after {elapsed:.2f} seconds - continuing with available data")
+        except Exception as e:
+            elapsed = time.time() - start_time
+            print(f"Error in data collection: {str(e)} (after {elapsed:.2f} seconds)")
+            # Don't re-raise to allow continued execution with partial data
+    
+    # Final catch-all to ensure we don't crash the main loop
+    except Exception as e:
+        elapsed = time.time() - start_time
+        print(f"Unexpected error in run_data_collection: {str(e)} (after {elapsed:.2f} seconds)")
+        # Continue execution despite errors
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Run data collection in historical or live mode')

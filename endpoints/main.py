@@ -7,6 +7,7 @@ import pytz
 from endpoints.db import ClickHouseDB
 from endpoints import bars, trades, quotes, news, indicators, master, bars_daily, master_v2
 from endpoints.process_ticker import process_ticker_with_connection, process_ticker
+from endpoints.polygon_client import close_session
 
 async def init_tables(db: ClickHouseDB) -> None:
     """
@@ -77,13 +78,19 @@ async def main(tickers: List[str], from_date: datetime, to_date: datetime, store
             
         # For live mode, we don't need to reinitialize the entire master table
         if store_latest_only:
-            print("\nSkipping full master table initialization in live mode...")
+            print("\nUpdating master table with latest data...")
+            start_time = time.time()
+            await master_v2.insert_latest_data(db, from_date, to_date)
+            print(f"Master table updated in {time.time() - start_time:.2f} seconds")
         else:
             # Initialize master table after all data is fetched (historical mode)
             print("\nInitializing master table...")
             start_time = time.time()
             await init_master_only(db, from_date, to_date, store_latest_only)
             print(f"Master table initialized successfully in {time.time() - start_time:.2f} seconds")
+        
+        # Close any remaining aiohttp sessions
+        await close_session()
         
         print(f"\nTotal execution time: {time.time() - total_start_time:.2f} seconds")
             
@@ -92,7 +99,8 @@ async def main(tickers: List[str], from_date: datetime, to_date: datetime, store
     finally:
         print("\nClosing database connection...")
         db.close()
-        print("Database connection closed")
+        await close_session()  # Ensure sessions are closed
+        print("Database connection and HTTP sessions closed")
 
 if __name__ == "__main__":
     # Example usage for creating just the master table
@@ -102,4 +110,9 @@ if __name__ == "__main__":
         asyncio.run(init_master_only(db))
         print(f"\nTotal execution time: {time.time() - start_time:.2f} seconds")
     finally:
-        db.close() 
+        db.close()
+        # Close HTTP sessions in a new event loop since we're in __main__
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(close_session())
+        loop.close() 

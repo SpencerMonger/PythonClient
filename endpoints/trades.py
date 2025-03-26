@@ -1,8 +1,9 @@
 import asyncio
 from datetime import datetime
 from typing import Dict, List
+import aiohttp
 
-from endpoints.polygon_client import get_rest_client
+from endpoints.polygon_client import get_rest_client, get_aiohttp_session
 from endpoints.db import ClickHouseDB
 from endpoints import config
 
@@ -22,58 +23,100 @@ TRADES_SCHEMA = {
 
 async def fetch_trades(ticker: str, from_date: datetime, to_date: datetime) -> List[Dict]:
     """
-    Fetch trades for a ticker between dates
+    Fetch trades for a ticker between dates using async HTTP
     """
-    client = get_rest_client()
     trades = []
     
     try:
+        # Use a ticker-specific session
+        session = await get_aiohttp_session(ticker)
+        
+        # Set a shorter timeout
+        timeout = aiohttp.ClientTimeout(total=5)
+        
         # If the dates are timezone-aware (live mode), use nanosecond timestamps
         if from_date.tzinfo is not None and to_date.tzinfo is not None:
             from_ns = int(from_date.timestamp() * 1_000_000_000)
             to_ns = int(to_date.timestamp() * 1_000_000_000)
-            print(f"Fetching trades for {ticker} from {from_date.strftime('%H:%M:00')} to {to_date.strftime('%H:%M:00')} ET...")
-            for trade in client.list_trades(
-                ticker=ticker,
-                timestamp_gte=from_ns,
-                timestamp_lt=to_ns,
-                limit=50000
-            ):
-                trades.append({
-                    "ticker": ticker,
-                    "sip_timestamp": trade.sip_timestamp,
-                    "participant_timestamp": trade.participant_timestamp,
-                    "trf_timestamp": trade.trf_timestamp,
-                    "sequence_number": trade.sequence_number,
-                    "price": float(trade.price) if trade.price is not None else None,
-                    "size": int(trade.size) if trade.size is not None else None,
-                    "conditions": trade.conditions or [],
-                    "exchange": int(trade.exchange) if trade.exchange is not None else None,
-                    "tape": int(trade.tape) if trade.tape is not None else None
-                })
+            
+            url = f"{config.POLYGON_API_URL}/v3/trades/{ticker}"
+            params = {
+                "timestamp.gte": from_ns,
+                "timestamp.lt": to_ns,
+                "limit": 50000,
+                "order": "asc",
+                "sort": "timestamp"
+            }
+            
+            # For live mode, we only need a few records for the last minute
+            if (to_date - from_date).total_seconds() < 120:  # Less than 2 minutes
+                params["limit"] = 100  # Reduced limit for live mode
+            
+            async with session.get(url, params=params, timeout=timeout) as response:
+                if response.status != 200:
+                    print(f"Error fetching trades for {ticker}: HTTP {response.status}")
+                    return []
+                    
+                data = await response.json()
+                
+                if 'results' not in data:
+                    # Return empty list without error to avoid cluttering logs
+                    return []
+                
+                for trade in data.get('results', []):
+                    trades.append({
+                        "ticker": ticker,
+                        "sip_timestamp": trade.get('sip_timestamp'),
+                        "participant_timestamp": trade.get('participant_timestamp'),
+                        "trf_timestamp": trade.get('trf_timestamp'),
+                        "sequence_number": trade.get('sequence_number'),
+                        "price": float(trade.get('price')) if trade.get('price') is not None else None,
+                        "size": int(trade.get('size')) if trade.get('size') is not None else None,
+                        "conditions": trade.get('conditions', []),
+                        "exchange": int(trade.get('exchange')) if trade.get('exchange') is not None else None,
+                        "tape": int(trade.get('tape')) if trade.get('tape') is not None else None
+                    })
         else:
             # For historical mode, use date strings
             from_str = from_date.strftime("%Y-%m-%d")
             to_str = to_date.strftime("%Y-%m-%d")
-            print(f"Fetching trades for {ticker} from {from_str} to {to_str}...")
-            for trade in client.list_trades(
-                ticker=ticker,
-                timestamp_gte=from_str,
-                timestamp_lt=to_str,
-                limit=50000
-            ):
-                trades.append({
-                    "ticker": ticker,
-                    "sip_timestamp": trade.sip_timestamp,
-                    "participant_timestamp": trade.participant_timestamp,
-                    "trf_timestamp": trade.trf_timestamp,
-                    "sequence_number": trade.sequence_number,
-                    "price": float(trade.price) if trade.price is not None else None,
-                    "size": int(trade.size) if trade.size is not None else None,
-                    "conditions": trade.conditions or [],
-                    "exchange": int(trade.exchange) if trade.exchange is not None else None,
-                    "tape": int(trade.tape) if trade.tape is not None else None
-                })
+            
+            url = f"{config.POLYGON_API_URL}/v3/trades/{ticker}"
+            params = {
+                "timestamp.gte": from_str,
+                "timestamp.lt": to_str,
+                "limit": 50000,
+                "order": "asc",
+                "sort": "timestamp"
+            }
+            
+            async with session.get(url, params=params, timeout=timeout) as response:
+                if response.status != 200:
+                    print(f"Error fetching trades for {ticker}: HTTP {response.status}")
+                    return []
+                    
+                data = await response.json()
+                
+                if 'results' not in data:
+                    # Return empty list without error to avoid cluttering logs
+                    return []
+                
+                for trade in data.get('results', []):
+                    trades.append({
+                        "ticker": ticker,
+                        "sip_timestamp": trade.get('sip_timestamp'),
+                        "participant_timestamp": trade.get('participant_timestamp'),
+                        "trf_timestamp": trade.get('trf_timestamp'),
+                        "sequence_number": trade.get('sequence_number'),
+                        "price": float(trade.get('price')) if trade.get('price') is not None else None,
+                        "size": int(trade.get('size')) if trade.get('size') is not None else None,
+                        "conditions": trade.get('conditions', []),
+                        "exchange": int(trade.get('exchange')) if trade.get('exchange') is not None else None,
+                        "tape": int(trade.get('tape')) if trade.get('tape') is not None else None
+                    })
+    except asyncio.TimeoutError:
+        print(f"Timeout fetching trades for {ticker}")
+        return []
     except Exception as e:
         print(f"Error fetching trades for {ticker}: {str(e)}")
         return []

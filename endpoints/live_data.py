@@ -9,6 +9,7 @@ from endpoints import config
 from endpoints.main_run import run_data_collection, tickers
 from endpoints.model_feed import run_model_feed
 from endpoints import master_v2
+from endpoints.polygon_client import close_session, get_aiohttp_session
 
 def is_market_open() -> bool:
     """
@@ -86,15 +87,21 @@ async def run_live_data() -> None:
         # Use Eastern Time for market hours
         et_tz = pytz.timezone('US/Eastern')
         
+        # Initialize all session pools once before the loop
+        for ticker in tickers:
+            await get_aiohttp_session(ticker)
+        await get_aiohttp_session()  # Default session
+            
         while True:
             try:
                 # Get current time in Eastern Time
                 now = datetime.now(et_tz)
                 
-                # Calculate time until next run (5 seconds past the next minute)
+                # Calculate time until next run (at the beginning of the next minute)
+                # This gives us more processing time
                 current_minute = now.replace(second=0, microsecond=0)
                 next_minute = current_minute + timedelta(minutes=1)
-                target_time = next_minute.replace(second=5)
+                target_time = next_minute.replace(second=1)  # Just 1 second past the minute
                 
                 # Calculate wait time until target time
                 wait_time = (target_time - now).total_seconds()
@@ -122,54 +129,72 @@ async def run_live_data() -> None:
                 print(f"\nStarting live data processing at {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
                 print(f"Processing {len(tickers)} tickers concurrently for {last_minute_start.strftime('%H:%M:00')} - {last_minute_end.strftime('%H:%M:00')} ET")
                 
+                # Start timing the execution
+                execution_start = time.time()
+                
                 # Run data collection in live mode with the previous minute's time range
-                # This now processes all tickers concurrently thanks to the updated main function
-                await run_data_collection(
-                    mode="live", 
-                    store_latest_only=True,
-                    from_date=last_minute_start,
-                    to_date=last_minute_end
+                # Set a hard timeout for the entire operation
+                data_collection_task = asyncio.create_task(
+                    run_data_collection(
+                        mode="live", 
+                        store_latest_only=True,
+                        from_date=last_minute_start,
+                        to_date=last_minute_end
+                    )
                 )
                 
-                # Update master tables with latest data after all tickers are processed
-                db = ClickHouseDB()
                 try:
-                    print("\n=== Updating master tables with latest data ===")
-                    print(f"Time range: {last_minute_start.strftime('%Y-%m-%d %H:%M:%S')} - {last_minute_end.strftime('%Y-%m-%d %H:%M:%S')} ET")
-                    
-                    # First, check if the tables exist
-                    master_exists = db.table_exists(config.TABLE_STOCK_MASTER)
-                    normalized_exists = db.table_exists(config.TABLE_STOCK_NORMALIZED)
-                    
-                    if not master_exists or not normalized_exists:
-                        print("Master and/or normalized tables don't exist, initializing them first...")
-                        await master_v2.init_master_v2(db)
-                    
-                    # Now update the tables with latest data
-                    await master_v2.insert_latest_data(db, last_minute_start, last_minute_end)
-                    print("Master tables updated successfully")
+                    await asyncio.wait_for(data_collection_task, timeout=7.0)  # 7-second hard timeout
+                    print(f"Data collection completed successfully")
+                except asyncio.TimeoutError:
+                    print(f"Data collection timeout - continuing with available data")
                 except Exception as e:
-                    print(f"Warning: Error updating master tables: {str(e)}")
-                    print("Continuing with execution despite master table update error")
-                finally:
-                    db.close()
+                    print(f"Data collection error: {str(e)}")
                 
-                # Run model feed after data collection
-                print("\n=== Triggering model predictions ===")
-                try:
-                    await run_model_feed()
-                    print("Model predictions completed successfully")
-                except Exception as e:
-                    print(f"Warning: Error in model predictions: {str(e)}")
-                    print("Continuing with execution despite prediction error")
+                # Log execution time for the data collection phase
+                data_collection_time = time.time() - execution_start
+                print(f"Data collection phase took {data_collection_time:.2f} seconds")
+                
+                # If we have time left from our 10-second budget, run model predictions
+                time_left = 9.0 - data_collection_time  # Use 9 seconds as the target to be safe
+                if time_left > 1.5:  # Only if we have at least 1.5 seconds left
+                    print("\n=== Triggering model predictions ===")
+                    try:
+                        await asyncio.wait_for(run_model_feed(), timeout=time_left)
+                        print("Model predictions completed successfully")
+                    except asyncio.TimeoutError:
+                        print(f"Model predictions timed out after {time_left:.2f} seconds")
+                    except Exception as e:
+                        print(f"Warning: Error in model predictions: {str(e)}")
+                else:
+                    print(f"Skipping model predictions due to time constraints ({time_left:.2f} seconds left)")
+                
+                # Close any active aiohttp sessions to free up resources
+                await close_session()
+                
+                # Log total execution time
+                total_time = time.time() - execution_start
+                print(f"\nTotal execution time: {total_time:.2f} seconds")
+                
+                # Reinitialize session pool for next run
+                for ticker in tickers:
+                    await get_aiohttp_session(ticker)
+                await get_aiohttp_session()
                     
             except Exception as e:
                 print(f"Error in processing cycle: {str(e)}")
-                # Wait until the next minute + 5 seconds before retrying
-                await asyncio.sleep(60)
+                # Close any active sessions on error
+                await close_session()
+                # Initialize new sessions
+                for ticker in tickers:
+                    await get_aiohttp_session(ticker)
+                await get_aiohttp_session()
+                # Wait a short time before retrying
+                await asyncio.sleep(5)
                 
     except KeyboardInterrupt:
         print("\nStopping live data collection...")
+        await close_session()
 
 if __name__ == "__main__":
     print(f"Starting live data collection with concurrent processing for {len(tickers)} tickers: {', '.join(tickers)}")

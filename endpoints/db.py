@@ -50,7 +50,6 @@ class ClickHouseDB:
             
         try:
             # Get column names from first row
-            prep_start = time.time()
             columns = list(data[0].keys())
             
             # Store total rows for sampling
@@ -86,9 +85,10 @@ class ClickHouseDB:
                                         dt = datetime.strptime(val, '%Y-%m-%d')
                                         row[field] = self._convert_to_est(dt)
                                     except ValueError:
-                                        print(f"Warning: Could not parse timestamp string: {val}")
+                                        pass  # Skip logging for performance
                     except Exception as e:
-                        print(f"Error converting timestamp {field}: {str(e)}")
+                        # Skip logging for performance
+                        pass
             
             # Add uni_id if not present
             if 'uni_id' not in columns:
@@ -109,7 +109,6 @@ class ClickHouseDB:
                             indicator_type = str(row.get('indicator_type', ''))
                             row['uni_id'] = self._generate_consistent_hash(ticker, timestamp_str, indicator_type)
                         except Exception as e:
-                            print(f"Error generating uni_id for indicators: {str(e)}")
                             row['uni_id'] = 0  # Fallback value
                 else:
                     # For all other tables, use ticker + timestamp
@@ -126,12 +125,10 @@ class ClickHouseDB:
                             ticker = str(row.get('ticker', ''))
                             row['uni_id'] = self._generate_consistent_hash(ticker, timestamp_str)
                         except Exception as e:
-                            print(f"Error generating uni_id: {str(e)}")
                             row['uni_id'] = 0  # Fallback value
                 columns = list(data[0].keys())  # Update columns list
             
             # Extract values in the same order as columns
-            print(f"\nPreparing data for {table_name}...")
             values = []
             for row in data:
                 try:
@@ -150,68 +147,32 @@ class ClickHouseDB:
                                 # Convert to EST
                                 val = self._convert_to_est(dt)
                             except Exception as e:
-                                print(f"Error converting timestamp {col}: {str(e)}")
                                 val = None
                         row_values.append(val)
                     values.append(row_values)
                 except Exception as e:
-                    print(f"Error processing row: {str(e)}")
                     continue  # Skip problematic rows
-                
-            print(f"Data preparation took: {time.time() - prep_start:.2f} seconds")
-            
-            print(f"Table: {table_name}")
-            print(f"Number of records: {len(data)}")
-            print(f"Number of columns: {len(columns)}")
-            print(f"Column names: {columns}")
-            if values:
-                print(f"First row values: {values[0]}")
             
             if not values:
-                print(f"No valid data to insert for {table_name}")
                 return
-            
-            # Create a function that will be executed in the thread pool
-            def insert_func():
-                try:
-                    print(f"\nStarting actual insert for {table_name}...")
-                    insert_start = time.time()
-                    
-                    # Try to get table schema
-                    try:
-                        schema_start = time.time()
-                        schema = self.client.command(f"DESCRIBE TABLE {self.database}.{table_name}")
-                        print(f"Schema retrieval took: {time.time() - schema_start:.2f} seconds")
-                    except Exception as e:
-                        print(f"Error getting schema: {str(e)}")
-                    
-                    # For bars table, use optimized insert settings
-                    if table_name == config.TABLE_STOCK_BARS:
-                        settings = {
-                            'async_insert': 1,
-                            'wait_for_async_insert': 0,
-                            'optimize_on_insert': 0
-                        }
-                        self.client.insert(f"{self.database}.{table_name}", values, column_names=columns, settings=settings)
-                    else:
-                        self.client.insert(f"{self.database}.{table_name}", values, column_names=columns)
-                    
-                    print(f"Actual insert operation took: {time.time() - insert_start:.2f} seconds")
-                    
-                except Exception as e:
-                    print(f"Error during insert: {str(e)}")
-                    print(f"Error type: {type(e)}")
-                    raise e
-            
-            # Run insert in thread pool to not block
-            print("\nStarting async insert...")
-            async_start = time.time()
-            await asyncio.get_event_loop().run_in_executor(None, insert_func)
-            print(f"Total async operation took: {time.time() - async_start:.2f} seconds")
+                
+            # Execute the insert directly in the current thread to avoid concurrent connection issues
+            try:
+                # For all tables, use optimized insert settings
+                settings = {
+                    'async_insert': 1,
+                    'wait_for_async_insert': 0,
+                    'optimize_on_insert': 0
+                }
+                
+                # This runs in the current thread and avoids concurrent connections
+                self.client.insert(f"{self.database}.{table_name}", values, column_names=columns, settings=settings)
+            except Exception as e:
+                print(f"Error during insert to {table_name}: {str(e)}")
+                raise e
             
         except Exception as e:
             print(f"Error storing {table_name}: {str(e)}")
-            print(f"Error type: {type(e)}")
             # Don't re-raise the error to allow the process to continue
 
     def drop_table_if_exists(self, table_name: str) -> None:
