@@ -3,11 +3,12 @@ import json
 import pickle
 from datetime import datetime
 import pandas as pd
-from typing import Dict, Any
+from typing import Dict, Any, List
 import numpy as np
 
 from endpoints.db import ClickHouseDB
 from endpoints import config
+from endpoints.main_run import tickers  # Import tickers list from main_run
 
 class ModelPredictor:
     def __init__(self):
@@ -62,13 +63,24 @@ class ModelPredictor:
         self.db.create_table_if_not_exists(config.TABLE_STOCK_PREDICTIONS, schema)
         
     async def get_latest_normalized_data(self) -> pd.DataFrame:
-        """Fetch the latest row from the normalized table"""
-        print("\nFetching latest normalized data...")
+        """Fetch the latest rows for each ticker from the normalized table"""
+        print(f"\nFetching latest normalized data for {len(tickers)} tickers...")
+        
+        # Query to get the latest data for each ticker
+        # Using a subquery to find the latest timestamp for each ticker,
+        # then joining to get all the columns for that timestamp
         query = f"""
-        SELECT *
-        FROM {config.CLICKHOUSE_DATABASE}.{config.TABLE_STOCK_NORMALIZED}
-        ORDER BY timestamp DESC
-        LIMIT 1
+        WITH latest_timestamps AS (
+            SELECT ticker, MAX(timestamp) as max_timestamp
+            FROM {config.CLICKHOUSE_DATABASE}.{config.TABLE_STOCK_NORMALIZED}
+            WHERE ticker IN ({', '.join([f"'{ticker}'" for ticker in tickers])})
+            GROUP BY ticker
+        )
+        SELECT n.*
+        FROM {config.CLICKHOUSE_DATABASE}.{config.TABLE_STOCK_NORMALIZED} n
+        INNER JOIN latest_timestamps l
+        ON n.ticker = l.ticker AND n.timestamp = l.max_timestamp
+        ORDER BY n.timestamp DESC
         """
         
         try:
@@ -78,8 +90,10 @@ class ModelPredictor:
                 return None
                 
             df = pd.DataFrame(result.result_rows, columns=result.column_names)
-            latest_timestamp = df['timestamp'].iloc[0]
-            print(f"Retrieved data for timestamp: {latest_timestamp}")
+            print(f"Retrieved data for {len(df)} tickers")
+            print(f"Tickers found: {', '.join(df['ticker'].unique())}")
+            latest_timestamp = df['timestamp'].max()
+            print(f"Latest timestamp: {latest_timestamp}")
             print(f"Data age: {datetime.now() - latest_timestamp}")
             return df
             
@@ -92,7 +106,7 @@ class ModelPredictor:
         if data is None or len(data) == 0:
             return None
             
-        print("\nPreparing data for prediction...")
+        print(f"\nPreparing data for prediction for ticker: {data['ticker'].iloc[0]}")
         # Ensure data has all required features
         missing_features = set(self.feature_columns) - set(data.columns)
         if missing_features:
@@ -179,7 +193,7 @@ class ModelPredictor:
                 'prediction_time': datetime.now()
             }
             
-            print(f"Prediction value: {prediction:.4f}")
+            print(f"Prediction for {result['ticker']}: {prediction:.4f}")
             return result
             
         except Exception as e:
@@ -193,7 +207,7 @@ class ModelPredictor:
         if prediction is None:
             return
             
-        print("\nStoring prediction in database...")
+        print(f"\nStoring prediction for {prediction['ticker']} in database...")
         try:
             # Generate a unique ID for the prediction based on timestamp, ticker, and prediction_time
             timestamp_str = prediction['timestamp'].isoformat() if hasattr(prediction['timestamp'], 'isoformat') else str(prediction['timestamp'])
@@ -208,30 +222,44 @@ class ModelPredictor:
             )
             
             await self.db.insert_data(config.TABLE_STOCK_PREDICTIONS, [prediction])
-            print("Successfully stored prediction")
+            print(f"Successfully stored prediction for {prediction['ticker']}")
             
         except Exception as e:
             print(f"Error storing prediction: {str(e)}")
             
     async def process_latest_data(self) -> None:
-        """Main function to process latest data and make prediction"""
+        """Main function to process latest data and make predictions for all tickers"""
         print("\n=== Starting prediction process ===")
         
-        # Get latest normalized data
-        data = await self.get_latest_normalized_data()
-        if data is None:
+        # Get latest normalized data for all tickers
+        df = await self.get_latest_normalized_data()
+        if df is None or len(df) == 0:
             print("No data to process")
             return
             
-        # Make prediction
-        prediction = self.make_prediction(data)
-        if prediction is None:
-            print("Could not make prediction")
-            return
+        # Process each ticker's data
+        predictions_made = 0
+        for ticker in tickers:
+            # Filter data for current ticker
+            ticker_data = df[df['ticker'] == ticker]
             
-        # Store prediction
-        await self.store_prediction(prediction)
-        print("\n=== Prediction process completed ===")
+            if len(ticker_data) == 0:
+                print(f"No data found for ticker {ticker}")
+                continue
+                
+            print(f"\nProcessing prediction for {ticker}...")
+            
+            # Make prediction
+            prediction = self.make_prediction(ticker_data)
+            if prediction is None:
+                print(f"Could not make prediction for {ticker}")
+                continue
+                
+            # Store prediction
+            await self.store_prediction(prediction)
+            predictions_made += 1
+        
+        print(f"\n=== Prediction process completed - {predictions_made}/{len(tickers)} predictions made ===")
         
     def close(self):
         """Close database connection"""

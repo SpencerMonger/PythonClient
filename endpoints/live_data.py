@@ -62,7 +62,7 @@ def verify_env():
 
 async def run_live_data() -> None:
     """
-    Main function to continuously process latest minute of data for multiple tickers
+    Main function to continuously process latest minute of data for multiple tickers concurrently
     """
     # Verify environment variables before starting
     verify_env()
@@ -120,9 +120,10 @@ async def run_live_data() -> None:
                 last_minute_start = last_minute_end - timedelta(minutes=1)  # Previous minute start
                 
                 print(f"\nStarting live data processing at {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-                print(f"Processing data for {last_minute_start.strftime('%H:%M:00')} - {last_minute_end.strftime('%H:%M:00')} ET")
+                print(f"Processing {len(tickers)} tickers concurrently for {last_minute_start.strftime('%H:%M:00')} - {last_minute_end.strftime('%H:%M:00')} ET")
                 
                 # Run data collection in live mode with the previous minute's time range
+                # This now processes all tickers concurrently thanks to the updated main function
                 await run_data_collection(
                     mode="live", 
                     store_latest_only=True,
@@ -130,7 +131,7 @@ async def run_live_data() -> None:
                     to_date=last_minute_end
                 )
                 
-                # Update master tables with latest data
+                # Update master tables with latest data after all tickers are processed
                 db = ClickHouseDB()
                 try:
                     print("\n=== Updating master tables with latest data ===")
@@ -171,5 +172,5 @@ async def run_live_data() -> None:
         print("\nStopping live data collection...")
 
 if __name__ == "__main__":
-    print(f"Starting live data collection for tickers: {', '.join(tickers)}")
+    print(f"Starting live data collection with concurrent processing for {len(tickers)} tickers: {', '.join(tickers)}")
     asyncio.run(run_live_data()) 

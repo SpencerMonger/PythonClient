@@ -7,7 +7,7 @@ import argparse
 import pytz
 
 # List of tickers to process
-tickers = ["AAPL",]
+tickers = ["AAPL", "MSFT", "GOOG", "AMZN", "META"]
 
 # Mode configuration
 TimeseriesMode = Literal["historical", "live"]
@@ -15,6 +15,7 @@ TimeseriesMode = Literal["historical", "live"]
 async def run_data_collection(mode: str = "historical", store_latest_only: bool = False, from_date: datetime = None, to_date: datetime = None) -> None:
     """
     Run data collection in either historical or live mode
+    All tickers are processed concurrently to maximize throughput
     
     Args:
         mode: Either "historical" or "live"
@@ -28,7 +29,7 @@ async def run_data_collection(mode: str = "historical", store_latest_only: bool 
         if from_date is None or to_date is None:
             to_date = datetime.now()
             from_date = to_date - timedelta(days=2)  # 2 days of historical data
-        print(f"Processing {len(tickers)} tickers for date range {from_date.strftime('%Y-%m-%d')} to {to_date.strftime('%Y-%m-%d')}")
+        print(f"Processing {len(tickers)} tickers concurrently for date range {from_date.strftime('%Y-%m-%d')} to {to_date.strftime('%Y-%m-%d')}")
     else:
         # For live mode, use Eastern Time
         et_tz = pytz.timezone('US/Eastern')
@@ -42,9 +43,9 @@ async def run_data_collection(mode: str = "historical", store_latest_only: bool 
             from_date = current_minute - timedelta(minutes=1)  # Start one minute before current
             to_date = current_minute  # End at the current minute
             
-        print(f"Processing data for {from_date.strftime('%H:%M:00')} - {to_date.strftime('%H:%M:00')} ET")
+        print(f"Processing {len(tickers)} tickers concurrently for {from_date.strftime('%H:%M:00')} - {to_date.strftime('%H:%M:00')} ET")
     
-    # Run main data collection
+    # Run main data collection with concurrent ticker processing
     await main(tickers, from_date, to_date, store_latest_only)
 
 def parse_args():
