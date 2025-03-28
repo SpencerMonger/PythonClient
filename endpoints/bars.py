@@ -29,7 +29,12 @@ async def fetch_bars(ticker: str, from_date: datetime, to_date: datetime) -> Lis
     from_str = from_date.strftime("%Y-%m-%d")
     to_str = to_date.strftime("%Y-%m-%d")
     
-    url = f"{config.POLYGON_API_URL}/v2/aggs/ticker/{ticker}/range/1/{config.TIMESPAN}/{from_str}/{to_str}?limit=50000"
+    # Add adjusted=true and sort=desc to get the latest data first
+    # Add limit=50000 to ensure we get enough bars
+    url = f"{config.POLYGON_API_URL}/v2/aggs/ticker/{ticker}/range/1/{config.TIMESPAN}/{from_str}/{to_str}?limit=50000&sort=desc&adjusted=true"
+    
+    print(f"[DEBUG API] {ticker} Fetching bars from: {url}")
+    print(f"[DEBUG API] {ticker} Time range: {from_date.strftime('%Y-%m-%d %H:%M:%S %Z')} to {to_date.strftime('%Y-%m-%d %H:%M:%S %Z')}")
     
     try:
         # Use a ticker-specific session
@@ -41,16 +46,22 @@ async def fetch_bars(ticker: str, from_date: datetime, to_date: datetime) -> Lis
         async with session.get(url, timeout=timeout) as response:
             if response.status != 200:
                 print(f"Error fetching bars for {ticker}: HTTP {response.status}")
+                body = await response.text()
+                print(f"[DEBUG API] {ticker} Error response: {body[:500]}")
                 return []
                 
             data = await response.json()
             
             if data.get('status') != 'OK' or 'results' not in data:
                 print(f"Error in API response for {ticker} bars: {data.get('error', 'Unknown error')}")
+                print(f"[DEBUG API] {ticker} Full response: {data}")
                 return []
                 
             bars = []
-            for bar in data['results']:
+            # Since we're sorting desc, reverse the results to maintain chronological order
+            results = list(reversed(data['results'])) if data['results'] else []
+            
+            for bar in results:
                 # Convert timestamp from milliseconds to nanoseconds for DateTime64(9)
                 timestamp = bar['t'] * 1_000_000  # ms to ns
                 
@@ -76,6 +87,12 @@ async def fetch_bars(ticker: str, from_date: datetime, to_date: datetime) -> Lis
                     "vwap": float(bar['vw']) if 'vw' in bar and bar['vw'] is not None else None,
                     "transactions": int(bar['n']) if 'n' in bar and bar['n'] is not None else None
                 })
+            
+            print(f"[DEBUG API] {ticker} Successfully fetched {len(bars)} bars")
+            if len(bars) > 0:
+                print(f"[DEBUG API] {ticker} First bar timestamp: {datetime.fromtimestamp(bars[0]['timestamp'] / 1e9).strftime('%Y-%m-%d %H:%M:%S')}")
+                print(f"[DEBUG API] {ticker} Last bar timestamp: {datetime.fromtimestamp(bars[-1]['timestamp'] / 1e9).strftime('%Y-%m-%d %H:%M:%S')}")
+            
     except asyncio.TimeoutError:
         print(f"Timeout fetching bars for {ticker}")
         return []

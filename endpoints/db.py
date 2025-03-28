@@ -158,15 +158,16 @@ class ClickHouseDB:
                 
             # Execute the insert directly in the current thread to avoid concurrent connection issues
             try:
-                # For all tables, use optimized insert settings
+                # Use fully synchronous insert settings instead of async
                 settings = {
-                    'async_insert': 1,
+                    'async_insert': 0,  # Disable async insert completely
                     'wait_for_async_insert': 0,
                     'optimize_on_insert': 0
                 }
                 
                 # This runs in the current thread and avoids concurrent connections
                 self.client.insert(f"{self.database}.{table_name}", values, column_names=columns, settings=settings)
+                print(f"Successfully inserted {len(values)} rows into {table_name}")
             except Exception as e:
                 print(f"Error during insert to {table_name}: {str(e)}")
                 raise e

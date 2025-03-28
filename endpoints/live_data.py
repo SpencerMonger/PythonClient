@@ -13,21 +13,9 @@ from endpoints.polygon_client import close_session, get_aiohttp_session
 
 def is_market_open() -> bool:
     """
-    Check if the US stock market is currently open
+    Always returns True since market hours are controlled externally
     """
-    et_tz = pytz.timezone('US/Eastern')
-    now = datetime.now(et_tz)
-    
-    # Check if it's a weekday
-    if now.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
-        return False
-    
-    # Convert current time to seconds since midnight
-    current_time = now.hour * 3600 + now.minute * 60 + now.second
-    market_open = 9 * 3600 + 30 * 60  # 9:30 AM
-    market_close = 16 * 3600  # 4:00 PM
-    
-    return market_open <= current_time <= market_close
+    return True
 
 def verify_env():
     """
@@ -96,6 +84,7 @@ async def run_live_data() -> None:
             try:
                 # Get current time in Eastern Time
                 now = datetime.now(et_tz)
+                print(f"\n[DEBUG LIVE] Current time: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
                 
                 # Calculate time until next run (at the beginning of the next minute)
                 # This gives us more processing time
@@ -113,18 +102,17 @@ async def run_live_data() -> None:
                 print(f"\nWaiting {wait_time:.2f} seconds until {target_time.strftime('%H:%M:%S')} ET...")
                 await asyncio.sleep(wait_time)
                 
-                # Check if market is open after waiting
-                if not is_market_open():
-                    now = datetime.now(et_tz)
-                    print(f"\nMarket is closed at {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-                    # Wait for 1 minute before checking again
-                    await asyncio.sleep(60)
-                    continue
-                
                 # After waiting, calculate the previous minute's time range
                 now = datetime.now(et_tz)
                 last_minute_end = now.replace(second=0, microsecond=0) - timedelta(minutes=1)  # Previous minute end
                 last_minute_start = last_minute_end - timedelta(minutes=1)  # Previous minute start
+                
+                # Add debug logs for exact timestamps
+                print(f"\n[DEBUG LIVE] Processing minute range:")
+                print(f"[DEBUG LIVE] From: {last_minute_start.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+                print(f"[DEBUG LIVE] To: {last_minute_end.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+                print(f"[DEBUG LIVE] From (UTC): {last_minute_start.astimezone(pytz.UTC).strftime('%Y-%m-%d %H:%M:%S %Z')}")
+                print(f"[DEBUG LIVE] To (UTC): {last_minute_end.astimezone(pytz.UTC).strftime('%Y-%m-%d %H:%M:%S %Z')}")
                 
                 print(f"\nStarting live data processing at {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
                 print(f"Processing {len(tickers)} tickers concurrently for {last_minute_start.strftime('%H:%M:00')} - {last_minute_end.strftime('%H:%M:00')} ET")
