@@ -1,6 +1,6 @@
 import asyncio
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List
 import pytz
 
@@ -84,7 +84,7 @@ async def run_live_data() -> None:
         raise
     
     try:
-        # Use Eastern Time for market hours
+        # Use Eastern Time for market hours check ONLY
         et_tz = pytz.timezone('US/Eastern')
         
         # Initialize all session pools once before the loop
@@ -94,59 +94,66 @@ async def run_live_data() -> None:
             
         while True:
             try:
-                # Get current time in Eastern Time
-                now = datetime.now(et_tz)
+                # Get current time in UTC
+                now_utc = datetime.now(timezone.utc)
                 
-                # Calculate time until next run (at the beginning of the next minute)
-                # This gives us more processing time
-                current_minute = now.replace(second=0, microsecond=0)
-                next_minute = current_minute + timedelta(minutes=1)
-                target_time = next_minute.replace(second=1)  # Just 1 second past the minute
+                # Calculate time until next run (at the beginning of the next minute in UTC)
+                current_minute_utc = now_utc.replace(second=0, microsecond=0)
+                next_minute_utc = current_minute_utc + timedelta(minutes=1)
+                target_time_utc = next_minute_utc.replace(second=1) # 1 second past the minute UTC
                 
                 # Calculate wait time until target time
-                wait_time = (target_time - now).total_seconds()
+                wait_time = (target_time_utc - now_utc).total_seconds()
+
                 if wait_time <= 0:
                     # If we've passed the target time, wait for the next minute
-                    target_time = target_time + timedelta(minutes=1)
-                    wait_time = (target_time - now).total_seconds()
+                    target_time_utc = target_time_utc + timedelta(minutes=1)
+                    wait_time = (target_time_utc - now_utc).total_seconds()
                 
-                print(f"\nWaiting {wait_time:.2f} seconds until {target_time.strftime('%H:%M:%S')} ET...")
+                # Convert target UTC time to ET for logging purposes
+                target_time_et = target_time_utc.astimezone(et_tz)
+                print(f"\nWaiting {wait_time:.2f} seconds until {target_time_et.strftime('%Y-%m-%d %H:%M:%S %Z')} ({target_time_utc.strftime('%Y-%m-%d %H:%M:%S %Z')})...")
                 await asyncio.sleep(wait_time)
                 
-                # Check if market is open after waiting
+                # Check if market is open *after* waiting, using ET time
                 if not is_market_open():
-                    now = datetime.now(et_tz)
-                    print(f"\nMarket is closed at {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+                    now_et = datetime.now(et_tz)
+                    print(f"\nMarket is closed at {now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}")
                     # Wait for 1 minute before checking again
                     await asyncio.sleep(60)
                     continue
                 
-                # After waiting, calculate the previous minute's time range
-                now = datetime.now(et_tz)
-                last_minute_end = now.replace(second=0, microsecond=0) - timedelta(minutes=1)  # Previous minute end
-                last_minute_start = last_minute_end - timedelta(minutes=1)  # Previous minute start
+                # After waiting, calculate the previous minute's time range in UTC
+                now_utc = datetime.now(timezone.utc)
+                # Use floor division for robustness around minute boundary
+                current_minute_utc = now_utc.replace(second=0, microsecond=0)
+                last_minute_end_utc = current_minute_utc # End of the *previous* minute interval (exclusive for Polygon)
+                last_minute_start_utc = last_minute_end_utc - timedelta(minutes=1) # Start of the previous minute interval
                 
-                print(f"\nStarting live data processing at {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-                print(f"Processing {len(tickers)} tickers concurrently for {last_minute_start.strftime('%H:%M:00')} - {last_minute_end.strftime('%H:%M:00')} ET")
-                
+                print(f"\nStarting live data processing at {now_utc.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+                print(f"Processing {len(tickers)} tickers concurrently for UTC range: {last_minute_start_utc.strftime('%Y-%m-%d %H:%M:%S')} - {last_minute_end_utc.strftime('%Y-%m-%d %H:%M:%S')}")
+                # Log ET range as well for comparison
+                print(f"Equivalent ET range: {last_minute_start_utc.astimezone(et_tz).strftime('%Y-%m-%d %H:%M:%S')} - {last_minute_end_utc.astimezone(et_tz).strftime('%Y-%m-%d %H:%M:%S %Z')}")
+
                 # Start timing the execution
                 execution_start = time.time()
                 
-                # Run data collection in live mode with the previous minute's time range
-                # Set a hard timeout for the entire operation
+                # Run data collection in live mode with the previous minute's UTC time range
                 data_collection_task = asyncio.create_task(
                     run_data_collection(
-                        mode="live", 
+                        mode="live",
                         store_latest_only=True,
-                        from_date=last_minute_start,
-                        to_date=last_minute_end
+                        from_date=last_minute_start_utc, # Pass UTC time
+                        to_date=last_minute_end_utc      # Pass UTC time
                     )
                 )
                 
                 try:
-                    await asyncio.wait_for(data_collection_task, timeout=7.0)  # 7-second hard timeout
+                    # INCREASED overall timeout significantly
+                    await asyncio.wait_for(data_collection_task, timeout=25.0)
                     print(f"Data collection completed successfully")
                 except asyncio.TimeoutError:
+                     # This timeout should be less likely now, but keep the handling
                     print(f"Data collection timeout - continuing with available data")
                 except Exception as e:
                     print(f"Data collection error: {str(e)}")
@@ -155,11 +162,13 @@ async def run_live_data() -> None:
                 data_collection_time = time.time() - execution_start
                 print(f"Data collection phase took {data_collection_time:.2f} seconds")
                 
-                # If we have time left from our 10-second budget, run model predictions
-                time_left = 9.0 - data_collection_time  # Use 9 seconds as the target to be safe
-                if time_left > 1.5:  # Only if we have at least 1.5 seconds left
+                # Adjust budget for model predictions based on new expected time
+                # Target completion within ~30 seconds total? Let's give model feed ~5 seconds if possible.
+                time_left = 28.0 - data_collection_time # Use 28s target for safety margin before next minute
+                if time_left > 1.5:
                     print("\n=== Triggering model predictions ===")
                     try:
+                        # Ensure run_model_feed uses UTC internally as well
                         await asyncio.wait_for(run_model_feed(), timeout=time_left)
                         print("Model predictions completed successfully")
                     except asyncio.TimeoutError:
@@ -169,31 +178,19 @@ async def run_live_data() -> None:
                 else:
                     print(f"Skipping model predictions due to time constraints ({time_left:.2f} seconds left)")
                 
-                # Close any active aiohttp sessions to free up resources
-                await close_session()
-                
                 # Log total execution time
                 total_time = time.time() - execution_start
                 print(f"\nTotal execution time: {total_time:.2f} seconds")
                 
-                # Reinitialize session pool for next run
-                for ticker in tickers:
-                    await get_aiohttp_session(ticker)
-                await get_aiohttp_session()
-                    
             except Exception as e:
                 print(f"Error in processing cycle: {str(e)}")
-                # Close any active sessions on error
-                await close_session()
-                # Initialize new sessions
-                for ticker in tickers:
-                    await get_aiohttp_session(ticker)
-                await get_aiohttp_session()
                 # Wait a short time before retrying
+                print("Waiting briefly before retrying...")
                 await asyncio.sleep(5)
                 
     except KeyboardInterrupt:
         print("\nStopping live data collection...")
+        # Close sessions cleanly on manual stop
         await close_session()
 
 if __name__ == "__main__":

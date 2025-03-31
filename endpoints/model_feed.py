@@ -1,7 +1,7 @@
 import os
 import json
 import pickle
-from datetime import datetime
+from datetime import datetime, timezone
 import pandas as pd
 from typing import Dict, Any, List
 import numpy as np
@@ -63,43 +63,48 @@ class ModelPredictor:
         self.db.create_table_if_not_exists(config.TABLE_STOCK_PREDICTIONS, schema)
         
     async def get_latest_normalized_data(self) -> pd.DataFrame:
-        """Fetch the latest rows for each ticker from the normalized table"""
+        """Fetch the latest rows for each ticker from the normalized table (expects UTC timestamps)"""
         print(f"\nFetching latest normalized data for {len(tickers)} tickers...")
-        
-        # Query to get the latest data for each ticker
-        # Using a subquery to find the latest timestamp for each ticker,
-        # then joining to get all the columns for that timestamp
+
+        # Query to get the latest data for each ticker based on MAX UTC timestamp
         query = f"""
         WITH latest_timestamps AS (
             SELECT ticker, MAX(timestamp) as max_timestamp
-            FROM {config.CLICKHOUSE_DATABASE}.{config.TABLE_STOCK_NORMALIZED}
+            FROM `{config.CLICKHOUSE_DATABASE}`.`{config.TABLE_STOCK_NORMALIZED}`
             WHERE ticker IN ({', '.join([f"'{ticker}'" for ticker in tickers])})
+              AND timestamp >= (now('UTC') - INTERVAL 2 MINUTE) -- Add time filter for efficiency
             GROUP BY ticker
         )
         SELECT n.*
-        FROM {config.CLICKHOUSE_DATABASE}.{config.TABLE_STOCK_NORMALIZED} n
+        FROM `{config.CLICKHOUSE_DATABASE}`.`{config.TABLE_STOCK_NORMALIZED}` n
         INNER JOIN latest_timestamps l
         ON n.ticker = l.ticker AND n.timestamp = l.max_timestamp
         ORDER BY n.timestamp DESC
         """
-        
+
         try:
             result = self.db.client.query(query)
             if result.row_count == 0:
-                print("No data found in normalized table")
-                return None
-                
+                print("No recent data found in normalized table")
+                return None # Changed from returning pd.DataFrame()
+
             df = pd.DataFrame(result.result_rows, columns=result.column_names)
             print(f"Retrieved data for {len(df)} tickers")
             print(f"Tickers found: {', '.join(df['ticker'].unique())}")
-            latest_timestamp = df['timestamp'].max()
-            print(f"Latest timestamp: {latest_timestamp}")
-            print(f"Data age: {datetime.now() - latest_timestamp}")
+
+            # Convert timestamp column to timezone-aware UTC pandas datetime
+            df['timestamp'] = pd.to_datetime(df['timestamp']).dt.tz_localize('UTC')
+
+            latest_timestamp_utc = df['timestamp'].max()
+            now_utc = datetime.now(timezone.utc)
+            print(f"Latest timestamp (UTC): {latest_timestamp_utc}")
+            print(f"Current time (UTC):   {now_utc}")
+            print(f"Data age: {now_utc - latest_timestamp_utc}")
             return df
-            
+
         except Exception as e:
             print(f"Error fetching normalized data: {str(e)}")
-            return None
+            return None # Changed from returning pd.DataFrame()
             
     def make_prediction(self, data: pd.DataFrame) -> Dict[str, Any]:
         """Make prediction using the loaded model"""
@@ -203,62 +208,77 @@ class ModelPredictor:
             return None
             
     async def store_prediction(self, prediction: Dict[str, Any]) -> None:
-        """Store the prediction in ClickHouse"""
+        """Store the prediction in ClickHouse, ensuring UTC timestamps are used for uni_id"""
         if prediction is None:
             return
-            
+
         print(f"\nStoring prediction for {prediction['ticker']} in database...")
         try:
-            # Generate a unique ID for the prediction based on timestamp, ticker, and prediction_time
-            timestamp_str = prediction['timestamp'].isoformat() if hasattr(prediction['timestamp'], 'isoformat') else str(prediction['timestamp'])
-            prediction_time_str = prediction['prediction_time'].isoformat() if hasattr(prediction['prediction_time'], 'isoformat') else str(prediction['prediction_time'])
-            
-            # Add uni_id to make each prediction unique using the ClickHouseDB's consistent hash method
+            # Ensure timestamps are aware UTC datetimes
+            timestamp_dt_utc = self.db._ensure_utc(prediction['timestamp'])
+            prediction_time_dt_utc = self.db._ensure_utc(prediction['prediction_time'])
+
+            if timestamp_dt_utc is None or prediction_time_dt_utc is None:
+                 print(f"Error: Could not ensure UTC for prediction timestamps for {prediction['ticker']}")
+                 return
+
+            # Use nanosecond epoch for hashing consistency
+            timestamp_ns_epoch = int(timestamp_dt_utc.timestamp() * 1e9)
+            prediction_time_ns = int(prediction_time_dt_utc.timestamp() * 1e9)
+
+            # Add uni_id using the ClickHouseDB's consistent hash method
             prediction['uni_id'] = self.db._generate_consistent_hash(
-                prediction['ticker'], 
-                timestamp_str,
-                prediction_time_str,
-                prediction['predicted_value']
+                prediction['ticker'],
+                timestamp_ns_epoch, # Use ns epoch
+                prediction_time_ns, # Use ns epoch
+                str(prediction['predicted_value']) # Ensure value is string for hash
             )
-            
+
+            # Ensure the datetime objects are passed for insertion
+            prediction['timestamp'] = timestamp_dt_utc
+            prediction['prediction_time'] = prediction_time_dt_utc
+
+
             await self.db.insert_data(config.TABLE_STOCK_PREDICTIONS, [prediction])
             print(f"Successfully stored prediction for {prediction['ticker']}")
-            
+
         except Exception as e:
             print(f"Error storing prediction: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
             
     async def process_latest_data(self) -> None:
         """Main function to process latest data and make predictions for all tickers"""
         print("\n=== Starting prediction process ===")
-        
+
         # Get latest normalized data for all tickers
         df = await self.get_latest_normalized_data()
         if df is None or len(df) == 0:
-            print("No data to process")
+            print("No recent normalized data to process for predictions") # Adjusted message
             return
-            
+
         # Process each ticker's data
         predictions_made = 0
         for ticker in tickers:
             # Filter data for current ticker
             ticker_data = df[df['ticker'] == ticker]
-            
+
             if len(ticker_data) == 0:
-                print(f"No data found for ticker {ticker}")
+                # print(f"No data found for ticker {ticker}") # Less verbose
                 continue
-                
+
             print(f"\nProcessing prediction for {ticker}...")
-            
+
             # Make prediction
-            prediction = self.make_prediction(ticker_data)
-            if prediction is None:
+            prediction_result = self.make_prediction(ticker_data) # Renamed variable
+            if prediction_result is None:
                 print(f"Could not make prediction for {ticker}")
                 continue
-                
+
             # Store prediction
-            await self.store_prediction(prediction)
+            await self.store_prediction(prediction_result) # Use renamed variable
             predictions_made += 1
-        
+
         print(f"\n=== Prediction process completed - {predictions_made}/{len(tickers)} predictions made ===")
         
     def close(self):

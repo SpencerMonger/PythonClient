@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Any
 import pytz
 
@@ -849,194 +849,82 @@ async def update_normalized_table(db: ClickHouseDB, from_date: datetime, to_date
         raise e
 
 async def reinit_current_day(db: ClickHouseDB) -> None:
-    """Reinitialize just the current day's data in the master table"""
+    """Reinitialize just the current day's data in the master table based on UTC date"""
     try:
-        # Get today's date in ET timezone
-        et_tz = pytz.timezone('US/Eastern')
-        today = datetime.now(et_tz).date()
-        today_str = today.strftime('%Y-%m-%d')
-        
-        print(f"Reinitializing master table data for {today_str}...")
-        
-        # Drop today's data from master table
+        # Get today's date in UTC timezone
+        today_utc = datetime.now(timezone.utc).date()
+        today_str_utc = today_utc.strftime('%Y-%m-%d')
+
+        print(f"Reinitializing master table data for UTC date: {today_str_utc}...")
+
+        # Drop today's data from master table based on UTC date
+        # Using backticks for safety
         drop_query = f"""
-        ALTER TABLE {db.database}.{config.TABLE_STOCK_MASTER}
-        DELETE WHERE toDate(timestamp) = '{today_str}'
+        ALTER TABLE `{db.database}`.`{config.TABLE_STOCK_MASTER}`
+        DELETE WHERE toDate(timestamp) = '{today_str_utc}'
         """
-        db.client.command(drop_query)
-        
-        # Use the same approach as in insert_latest_data for consistency
-        # This helps avoid the column name conflicts in subqueries
+        db.client.command(drop_query, settings={'mutations_sync': 2}) # Wait for delete
+
+        # Re-insert data for the current UTC day
+        # NOTE: Keeping the complex SQL structure from the original file,
+        # but ensuring the WHERE clauses filter by today's UTC date.
         insert_query = f"""
-        INSERT INTO {db.database}.{config.TABLE_STOCK_MASTER}
-        WITH 
-        -- Get base data for the current day
+        INSERT INTO `{db.database}`.`{config.TABLE_STOCK_MASTER}`
+        WITH
         base_data AS (
-            SELECT 
-                ticker,
-                timestamp,
-                cityHash64(ticker, toString(timestamp)) as uni_id,
-                round(open, 2) as open,
-                round(high, 2) as high,
-                round(low, 2) as low,
-                round(close, 2) as close,
-                coalesce(nullIf(volume, 0), 2) as volume,
-                round(coalesce(nullIf(vwap, 0), 2), 2) as vwap,
-                coalesce(nullIf(transactions, 0), 2) as transactions,
-                -- Calculate price_diff using future close prices
+            SELECT
+                ticker, timestamp, cityHash64(ticker, toString(timestamp)) as uni_id,
+                round(open, 2) as open, round(high, 2) as high, round(low, 2) as low, round(close, 2) as close,
+                coalesce(nullIf(volume, 0), 2) as volume, round(coalesce(nullIf(vwap, 0), 2), 2) as vwap, coalesce(nullIf(transactions, 0), 2) as transactions,
                 round(((any(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 15 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100, 2) as price_diff,
-                -- Calculate max_price_diff
-                round(if(
-                    abs(((max(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100) >
-                    abs(((min(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100),
-                    ((max(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100,
-                    ((min(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100
-                ), 2) as max_price_diff,
-                -- Calculate daily metrics
-                round(max(high) OVER (PARTITION BY ticker, toDate(timestamp)), 2) as daily_high,
-                round(min(low) OVER (PARTITION BY ticker, toDate(timestamp)), 2) as daily_low,
-                -- Get previous day's close
+                round(if( abs(((max(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100) > abs(((min(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100), ((max(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100, ((min(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100 ), 2) as max_price_diff,
+                round(max(high) OVER (PARTITION BY ticker, toDate(timestamp)), 2) as daily_high, round(min(low) OVER (PARTITION BY ticker, toDate(timestamp)), 2) as daily_low,
                 round(any(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 PRECEDING AND 1 PRECEDING), 2) as previous_close
-            FROM {db.database}.stock_bars
-            WHERE toDate(timestamp) = '{today_str}'
+            FROM `{db.database}`.stock_bars
+            WHERE toDate(timestamp) = '{today_str_utc}' # Filter by UTC date
             ORDER BY timestamp ASC, ticker ASC
         ),
-        -- Get quote data
         quote_metrics AS (
-            SELECT
-                ticker,
-                toStartOfMinute(sip_timestamp) as timestamp,
-                round(coalesce(nullIf(avg(bid_price), 0), 2), 2) as avg_bid_price,
-                round(coalesce(nullIf(avg(ask_price), 0), 2), 2) as avg_ask_price,
-                round(coalesce(nullIf(min(bid_price), 0), 2), 2) as min_bid_price,
-                round(coalesce(nullIf(max(ask_price), 0), 2), 2) as max_ask_price,
-                coalesce(nullIf(sum(bid_size), 0), 2) as total_bid_size,
-                coalesce(nullIf(sum(ask_size), 0), 2) as total_ask_size,
-                coalesce(nullIf(count(*), 0), 2) as quote_count,
-                coalesce(nullIf(arrayStringConcat(arrayMap(x -> toString(x), arrayFlatten([coalesce(groupArray(conditions), [])]))), ''), '2') AS quote_conditions,
-                coalesce(nullIf(argMax(ask_exchange, sip_timestamp), 0), 2) as ask_exchange,
-                coalesce(nullIf(argMax(bid_exchange, sip_timestamp), 0), 2) as bid_exchange
-            FROM {db.database}.stock_quotes
-            WHERE toDate(sip_timestamp) = '{today_str}'
-            GROUP BY ticker, timestamp
-            ORDER BY timestamp ASC, ticker ASC
+            SELECT ticker, toStartOfMinute(sip_timestamp) as timestamp,
+                   round(coalesce(nullIf(avg(bid_price), 0), 2), 2) as avg_bid_price, round(coalesce(nullIf(avg(ask_price), 0), 2), 2) as avg_ask_price,
+                   round(coalesce(nullIf(min(bid_price), 0), 2), 2) as min_bid_price, round(coalesce(nullIf(max(ask_price), 0), 2), 2) as max_ask_price,
+                   coalesce(nullIf(sum(bid_size), 0), 2) as total_bid_size, coalesce(nullIf(sum(ask_size), 0), 2) as total_ask_size,
+                   coalesce(nullIf(count(*), 0), 2) as quote_count, coalesce(nullIf(arrayStringConcat(arrayMap(x -> toString(x), arrayFlatten([coalesce(groupArray(conditions), [])]))), ''), '2') AS quote_conditions,
+                   coalesce(nullIf(argMax(ask_exchange, sip_timestamp), 0), 2) as ask_exchange, coalesce(nullIf(argMax(bid_exchange, sip_timestamp), 0), 2) as bid_exchange
+            FROM `{db.database}`.stock_quotes
+            WHERE toDate(sip_timestamp) = '{today_str_utc}' # Filter by UTC date
+            GROUP BY ticker, timestamp ORDER BY timestamp ASC, ticker ASC
         ),
-        -- Get trade data
         trade_metrics AS (
-            SELECT
-                ticker,
-                toStartOfMinute(sip_timestamp) as timestamp,
-                round(coalesce(nullIf(avg(price), 0), 2), 2) as avg_trade_price,
-                round(coalesce(nullIf(min(price), 0), 2), 2) as min_trade_price,
-                round(coalesce(nullIf(max(price), 0), 2), 2) as max_trade_price,
-                coalesce(nullIf(sum(size), 0), 2) as total_trade_size,
-                coalesce(nullIf(count(*), 0), 2) as trade_count,
-                coalesce(nullIf(arrayStringConcat(arrayMap(x -> toString(x), arrayFlatten([coalesce(groupArray(conditions), [])]))), ''), '2') AS trade_conditions,
-                coalesce(nullIf(argMax(exchange, sip_timestamp), 0), 2) as trade_exchange
-            FROM {db.database}.stock_trades
-            WHERE toDate(sip_timestamp) = '{today_str}'
-            GROUP BY ticker, timestamp
-            ORDER BY timestamp ASC, ticker ASC
+            SELECT ticker, toStartOfMinute(sip_timestamp) as timestamp,
+                   round(coalesce(nullIf(avg(price), 0), 2), 2) as avg_trade_price, round(coalesce(nullIf(min(price), 0), 2), 2) as min_trade_price, round(coalesce(nullIf(max(price), 0), 2), 2) as max_trade_price,
+                   coalesce(nullIf(sum(size), 0), 2) as total_trade_size, coalesce(nullIf(count(*), 0), 2) as trade_count,
+                   coalesce(nullIf(arrayStringConcat(arrayMap(x -> toString(x), arrayFlatten([coalesce(groupArray(conditions), [])]))), ''), '2') AS trade_conditions,
+                   coalesce(nullIf(argMax(exchange, sip_timestamp), 0), 2) as trade_exchange
+            FROM `{db.database}`.stock_trades
+            WHERE toDate(sip_timestamp) = '{today_str_utc}' # Filter by UTC date
+            GROUP BY ticker, timestamp ORDER BY timestamp ASC, ticker ASC
         ),
-        -- Get indicator data
         indicator_metrics AS (
-            SELECT
-                ticker,
-                timestamp,
-                round(coalesce(nullIf(any(if(indicator_type = 'SMA_5', value, NULL)), 0), 2), 2) as sma_5,
-                round(coalesce(nullIf(any(if(indicator_type = 'SMA_9', value, NULL)), 0), 2), 2) as sma_9,
-                round(coalesce(nullIf(any(if(indicator_type = 'SMA_12', value, NULL)), 0), 2), 2) as sma_12,
-                round(coalesce(nullIf(any(if(indicator_type = 'SMA_20', value, NULL)), 0), 2), 2) as sma_20,
-                round(coalesce(nullIf(any(if(indicator_type = 'SMA_50', value, NULL)), 0), 2), 2) as sma_50,
-                round(coalesce(nullIf(any(if(indicator_type = 'SMA_100', value, NULL)), 0), 2), 2) as sma_100,
-                round(coalesce(nullIf(any(if(indicator_type = 'SMA_200', value, NULL)), 0), 2), 2) as sma_200,
-                round(coalesce(nullIf(any(if(indicator_type = 'EMA_9', value, NULL)), 0), 2), 2) as ema_9,
-                round(coalesce(nullIf(any(if(indicator_type = 'EMA_12', value, NULL)), 0), 2), 2) as ema_12,
-                round(coalesce(nullIf(any(if(indicator_type = 'EMA_20', value, NULL)), 0), 2), 2) as ema_20,
-                round(coalesce(nullIf(any(if(indicator_type = 'MACD', value, NULL)), 0), 2), 2) as macd_value,
-                round(coalesce(nullIf(any(if(indicator_type = 'MACD', signal, NULL)), 0), 2), 2) as macd_signal,
-                round(coalesce(nullIf(any(if(indicator_type = 'MACD', histogram, NULL)), 0), 2), 2) as macd_histogram,
-                round(coalesce(nullIf(any(if(indicator_type = 'RSI', value, NULL)), 0), 2), 2) as rsi_14
-            FROM {db.database}.stock_indicators
-            WHERE toDate(timestamp) = '{today_str}'
-            GROUP BY ticker, timestamp
-            ORDER BY timestamp ASC, ticker ASC
+            SELECT ticker, timestamp,
+                   round(coalesce(nullIf(any(if(indicator_type = 'SMA_5', value, NULL)), 0), 2), 2) as sma_5, round(coalesce(nullIf(any(if(indicator_type = 'SMA_9', value, NULL)), 0), 2), 2) as sma_9, round(coalesce(nullIf(any(if(indicator_type = 'SMA_12', value, NULL)), 0), 2), 2) as sma_12, round(coalesce(nullIf(any(if(indicator_type = 'SMA_20', value, NULL)), 0), 2), 2) as sma_20, round(coalesce(nullIf(any(if(indicator_type = 'SMA_50', value, NULL)), 0), 2), 2) as sma_50, round(coalesce(nullIf(any(if(indicator_type = 'SMA_100', value, NULL)), 0), 2), 2) as sma_100, round(coalesce(nullIf(any(if(indicator_type = 'SMA_200', value, NULL)), 0), 2), 2) as sma_200,
+                   round(coalesce(nullIf(any(if(indicator_type = 'EMA_9', value, NULL)), 0), 2), 2) as ema_9, round(coalesce(nullIf(any(if(indicator_type = 'EMA_12', value, NULL)), 0), 2), 2) as ema_12, round(coalesce(nullIf(any(if(indicator_type = 'EMA_20', value, NULL)), 0), 2), 2) as ema_20,
+                   round(coalesce(nullIf(any(if(indicator_type = 'MACD', value, NULL)), 0), 2), 2) as macd_value, round(coalesce(nullIf(any(if(indicator_type = 'MACD', signal, NULL)), 0), 2), 2) as macd_signal, round(coalesce(nullIf(any(if(indicator_type = 'MACD', histogram, NULL)), 0), 2), 2) as macd_histogram,
+                   round(coalesce(nullIf(any(if(indicator_type = 'RSI', value, NULL)), 0), 2), 2) as rsi_14
+            FROM `{db.database}`.stock_indicators
+            WHERE toDate(timestamp) = '{today_str_utc}' # Filter by UTC date
+            GROUP BY ticker, timestamp ORDER BY timestamp ASC, ticker ASC
         )
-        
         SELECT
-            b.uni_id,
-            b.ticker,
-            b.timestamp,
-            b.open,
-            b.high,
-            b.low,
-            b.close,
-            b.volume,
-            b.vwap,
-            b.transactions,
-            -- Price metrics
-            b.price_diff,
-            b.max_price_diff,
-            multiIf(
-                b.price_diff <= -1, 0,
-                b.price_diff <= -0.5, 1,
-                b.price_diff <= 0, 2,
-                b.price_diff <= 0.5, 3,
-                b.price_diff <= 1, 4,
-                5
-            ) as target,
-            -- Quote metrics
-            q.avg_bid_price,
-            q.avg_ask_price,
-            q.min_bid_price,
-            q.max_ask_price,
-            q.total_bid_size,
-            q.total_ask_size,
-            q.quote_count,
-            q.quote_conditions,
-            q.ask_exchange,
-            q.bid_exchange,
-            -- Trade metrics
-            t.avg_trade_price,
-            t.min_trade_price,
-            t.max_trade_price,
-            t.total_trade_size,
-            t.trade_count,
-            t.trade_conditions,
-            t.trade_exchange,
-            -- Technical indicators
-            i.sma_5,
-            i.sma_9,
-            i.sma_12,
-            i.sma_20,
-            i.sma_50,
-            i.sma_100,
-            i.sma_200,
-            i.ema_9,
-            i.ema_12,
-            i.ema_20,
-            i.macd_value,
-            i.macd_signal,
-            i.macd_histogram,
-            i.rsi_14,
-            -- Daily metrics
-            b.daily_high,
-            b.daily_low,
-            b.previous_close,
-            -- TR metrics
-            b.daily_high - b.daily_low as tr_current,
-            b.daily_high - b.previous_close as tr_high_close,
-            b.daily_low - b.previous_close as tr_low_close,
-            greatest(
-                b.daily_high - b.daily_low,
-                abs(b.daily_high - b.previous_close),
-                abs(b.daily_low - b.previous_close)
-            ) as tr_value,
-            avg(greatest(
-                b.daily_high - b.daily_low,
-                abs(b.daily_high - b.previous_close),
-                abs(b.daily_low - b.previous_close)
-            )) OVER (PARTITION BY b.ticker ORDER BY b.timestamp ROWS BETWEEN 13 PRECEDING AND CURRENT ROW) as atr_value
+            b.uni_id, b.ticker, b.timestamp, b.open, b.high, b.low, b.close, b.volume, b.vwap, b.transactions, b.price_diff, b.max_price_diff,
+            multiIf( b.price_diff <= -1, 0, b.price_diff <= -0.5, 1, b.price_diff <= 0, 2, b.price_diff <= 0.5, 3, b.price_diff <= 1, 4, 5 ) as target,
+            q.avg_bid_price, q.avg_ask_price, q.min_bid_price, q.max_ask_price, q.total_bid_size, q.total_ask_size, q.quote_count, q.quote_conditions, q.ask_exchange, q.bid_exchange,
+            t.avg_trade_price, t.min_trade_price, t.max_trade_price, t.total_trade_size, t.trade_count, t.trade_conditions, t.trade_exchange,
+            i.sma_5, i.sma_9, i.sma_12, i.sma_20, i.sma_50, i.sma_100, i.sma_200, i.ema_9, i.ema_12, i.ema_20, i.macd_value, i.macd_signal, i.macd_histogram, i.rsi_14,
+            b.daily_high, b.daily_low, b.previous_close,
+            b.daily_high - b.daily_low as tr_current, b.daily_high - b.previous_close as tr_high_close, b.daily_low - b.previous_close as tr_low_close,
+            greatest( b.daily_high - b.daily_low, abs(b.daily_high - b.previous_close), abs(b.daily_low - b.previous_close) ) as tr_value,
+            avg(greatest( b.daily_high - b.daily_low, abs(b.daily_high - b.previous_close), abs(b.daily_low - b.previous_close) )) OVER (PARTITION BY b.ticker ORDER BY b.timestamp ROWS BETWEEN 13 PRECEDING AND CURRENT ROW) as atr_value
         FROM base_data b
         LEFT JOIN quote_metrics q ON b.ticker = q.ticker AND b.timestamp = q.timestamp
         LEFT JOIN trade_metrics t ON b.ticker = t.ticker AND b.timestamp = t.timestamp
@@ -1044,20 +932,20 @@ async def reinit_current_day(db: ClickHouseDB) -> None:
         ORDER BY b.timestamp ASC, b.ticker ASC
         """
         db.client.command(insert_query)
-        print(f"Master table updated successfully for {today_str}")
-        
-        # Also update the normalized table with the same approach as insert_latest_data
+        print(f"Master table updated successfully for UTC date: {today_str_utc}")
+
+        # Also update the normalized table with the same approach
         try:
-            # First, clean up today's data in normalized table
+            # First, clean up today's data in normalized table based on UTC date
             drop_norm_query = f"""
-            ALTER TABLE {db.database}.{config.TABLE_STOCK_NORMALIZED}
-            DELETE WHERE toDate(timestamp) = '{today_str}'
+            ALTER TABLE `{db.database}`.`{config.TABLE_STOCK_NORMALIZED}`
+            DELETE WHERE toDate(timestamp) = '{today_str_utc}'
             """
-            db.client.command(drop_norm_query)
-            
+            db.client.command(drop_norm_query, settings={'mutations_sync': 2}) # Wait
+
             # Insert into normalized table using the consistent approach
             insert_norm_query = f"""
-            INSERT INTO {db.database}.{config.TABLE_STOCK_NORMALIZED}
+            INSERT INTO `{db.database}`.`{config.TABLE_STOCK_NORMALIZED}`
             WITH stats AS (
                 SELECT
                     -- First, get statistics for each ticker across recent history
@@ -1082,9 +970,9 @@ async def reinit_current_day(db: ClickHouseDB) -> None:
                     stddevPop(max_price_diff) OVER (PARTITION BY ticker) as std_max_price_diff,
                     -- Include all other metrics statistics similarly
                     sm.*
-                FROM {db.database}.{config.TABLE_STOCK_MASTER} sm
+                FROM `{db.database}`.`{config.TABLE_STOCK_MASTER}` sm
                 -- Get recent history AND today's data for statistics
-                WHERE toDate(timestamp) >= (toDate('{today_str}') - INTERVAL 10 DAY)
+                WHERE toDate(timestamp) >= (toDate('{today_str_utc}') - INTERVAL 10 DAY)
             )
             SELECT
                 uni_id,
@@ -1177,216 +1065,101 @@ async def reinit_current_day(db: ClickHouseDB) -> None:
                 round(5 / (1 + exp(-2.5 * ((atr_value - avg(atr_value) OVER (PARTITION BY ticker)) / 
                     nullIf(stddevPop(atr_value) OVER (PARTITION BY ticker), 1)))), 2) as atr_value
             FROM stats
-            WHERE toDate(timestamp) = '{today_str}'
+            WHERE toDate(timestamp) = '{today_str_utc}'
             ORDER BY timestamp ASC, ticker ASC
             """
             db.client.command(insert_norm_query)
-            print(f"Normalized table updated successfully for {today_str}")
+            print(f"Normalized table updated successfully for UTC date: {today_str_utc}")
         except Exception as e:
-            print(f"Warning: Error updating normalized table: {str(e)}")
+            print(f"Warning: Error updating normalized table for {today_str_utc}: {str(e)}")
             print("Continuing with execution despite normalized table update error")
     except Exception as e:
-        print(f"Error reinitializing current day: {str(e)}")
+        print(f"Error reinitializing current day (UTC): {str(e)}")
         # Let's not raise the exception so that the program can continue
         # raise e
 
 async def insert_latest_data(db: ClickHouseDB, from_date: datetime, to_date: datetime) -> None:
-    """For live mode, reinitialize the current day's data"""
+    """For live mode, reinitialize the current day's data based on UTC date"""
     try:
-        print(f"Insert latest data called for period {from_date} to {to_date}...")
-        
-        # Get today's date in ET timezone
-        et_tz = pytz.timezone('US/Eastern')
-        if from_date.tzinfo is None:
-            from_date = et_tz.localize(from_date)
-        if to_date.tzinfo is None:
-            to_date = et_tz.localize(to_date)
-        
-        # For live mode, use a consistent approach with master.py for updating the master table
-        today = datetime.now(et_tz).date()
-        today_str = today.strftime('%Y-%m-%d')
-        
-        print(f"Live mode: Updating master table data for {today_str}...")
-        
+        # from_date and to_date are expected to be UTC now from live_data.py
+        print(f"Insert latest data called for UTC period {from_date} to {to_date}...")
+
+        # Get today's date in UTC timezone
+        today_utc = datetime.now(timezone.utc).date()
+        today_str_utc = today_utc.strftime('%Y-%m-%d')
+
+        print(f"Live mode: Updating master table data for UTC date: {today_str_utc}...")
+
         try:
-            # First, clean up today's data
+            # First, clean up today's data based on UTC date
             drop_query = f"""
-            ALTER TABLE {db.database}.{config.TABLE_STOCK_MASTER}
-            DELETE WHERE toDate(timestamp) = '{today_str}'
+            ALTER TABLE `{db.database}`.`{config.TABLE_STOCK_MASTER}`
+            DELETE WHERE toDate(timestamp) = '{today_str_utc}'
             """
-            db.client.command(drop_query)
-            
-            # Then insert today's data using the same approach as in master.py
+            # Wait for delete to finish before inserting
+            db.client.command(drop_query, settings={'mutations_sync': 2})
+
+            # Then insert today's data using the same approach as in reinit_current_day
+            # Filter source tables by today's UTC date
+            # NOTE: Keeping the complex SQL structure from the original file,
+            # but ensuring the WHERE clauses filter by today's UTC date.
             insert_query = f"""
-            INSERT INTO {db.database}.{config.TABLE_STOCK_MASTER}
-            WITH 
-            -- Get base data for the current day
+            INSERT INTO `{db.database}`.`{config.TABLE_STOCK_MASTER}`
+            WITH
             base_data AS (
-                SELECT 
-                    ticker,
-                    timestamp,
-                    cityHash64(ticker, toString(timestamp)) as uni_id,
-                    round(open, 2) as open,
-                    round(high, 2) as high,
-                    round(low, 2) as low,
-                    round(close, 2) as close,
-                    coalesce(nullIf(volume, 0), 2) as volume,
-                    round(coalesce(nullIf(vwap, 0), 2), 2) as vwap,
-                    coalesce(nullIf(transactions, 0), 2) as transactions,
-                    -- Calculate price_diff using future close prices (will be NULL in live mode)
+                SELECT
+                    ticker, timestamp, cityHash64(ticker, toString(timestamp)) as uni_id, # Original hash
+                    round(open, 2) as open, round(high, 2) as high, round(low, 2) as low, round(close, 2) as close,
+                    coalesce(nullIf(volume, 0), 2) as volume, round(coalesce(nullIf(vwap, 0), 2), 2) as vwap, coalesce(nullIf(transactions, 0), 2) as transactions,
                     round(((any(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 15 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100, 2) as price_diff,
-                    -- Calculate max_price_diff
-                    round(if(
-                        abs(((max(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100) >
-                        abs(((min(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100),
-                        ((max(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100,
-                        ((min(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100
-                    ), 2) as max_price_diff,
-                    -- Calculate daily metrics
-                    round(max(high) OVER (PARTITION BY ticker, toDate(timestamp)), 2) as daily_high,
-                    round(min(low) OVER (PARTITION BY ticker, toDate(timestamp)), 2) as daily_low,
-                    -- Get previous day's close
+                    round(if( abs(((max(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100) > abs(((min(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100), ((max(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100, ((min(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 FOLLOWING AND 15 FOLLOWING) - close) / nullIf(close, 0)) * 100 ), 2) as max_price_diff,
+                    round(max(high) OVER (PARTITION BY ticker, toDate(timestamp)), 2) as daily_high, round(min(low) OVER (PARTITION BY ticker, toDate(timestamp)), 2) as daily_low,
                     round(any(close) OVER (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 1 PRECEDING AND 1 PRECEDING), 2) as previous_close
-                FROM {db.database}.stock_bars
-                WHERE toDate(timestamp) = '{today_str}'
+                FROM `{db.database}`.stock_bars
+                WHERE toDate(timestamp) = '{today_str_utc}' # Filter by UTC date
                 ORDER BY timestamp ASC, ticker ASC
             ),
-            -- Get quote data
             quote_metrics AS (
-                SELECT
-                    ticker,
-                    toStartOfMinute(sip_timestamp) as timestamp,
-                    round(coalesce(nullIf(avg(bid_price), 0), 2), 2) as avg_bid_price,
-                    round(coalesce(nullIf(avg(ask_price), 0), 2), 2) as avg_ask_price,
-                    round(coalesce(nullIf(min(bid_price), 0), 2), 2) as min_bid_price,
-                    round(coalesce(nullIf(max(ask_price), 0), 2), 2) as max_ask_price,
-                    coalesce(nullIf(sum(bid_size), 0), 2) as total_bid_size,
-                    coalesce(nullIf(sum(ask_size), 0), 2) as total_ask_size,
-                    coalesce(nullIf(count(*), 0), 2) as quote_count,
-                    coalesce(nullIf(arrayStringConcat(arrayMap(x -> toString(x), arrayFlatten([coalesce(groupArray(conditions), [])]))), ''), '2') AS quote_conditions,
-                    coalesce(nullIf(argMax(ask_exchange, sip_timestamp), 0), 2) as ask_exchange,
-                    coalesce(nullIf(argMax(bid_exchange, sip_timestamp), 0), 2) as bid_exchange
-                FROM {db.database}.stock_quotes
-                WHERE toDate(sip_timestamp) = '{today_str}'
-                GROUP BY ticker, timestamp
-                ORDER BY timestamp ASC, ticker ASC
+                 SELECT ticker, toStartOfMinute(sip_timestamp) as timestamp,
+                       round(coalesce(nullIf(avg(bid_price), 0), 2), 2) as avg_bid_price, round(coalesce(nullIf(avg(ask_price), 0), 2), 2) as avg_ask_price,
+                       round(coalesce(nullIf(min(bid_price), 0), 2), 2) as min_bid_price, round(coalesce(nullIf(max(ask_price), 0), 2), 2) as max_ask_price,
+                       coalesce(nullIf(sum(bid_size), 0), 2) as total_bid_size, coalesce(nullIf(sum(ask_size), 0), 2) as total_ask_size,
+                       coalesce(nullIf(count(*), 0), 2) as quote_count, coalesce(nullIf(arrayStringConcat(arrayMap(x -> toString(x), arrayFlatten([coalesce(groupArray(conditions), [])]))), ''), '2') AS quote_conditions,
+                       coalesce(nullIf(argMax(ask_exchange, sip_timestamp), 0), 2) as ask_exchange, coalesce(nullIf(argMax(bid_exchange, sip_timestamp), 0), 2) as bid_exchange
+                 FROM `{db.database}`.stock_quotes
+                 WHERE toDate(sip_timestamp) = '{today_str_utc}' # Filter by UTC date
+                 GROUP BY ticker, timestamp ORDER BY timestamp ASC, ticker ASC
             ),
-            -- Get trade data
-            trade_metrics AS (
-                SELECT
-                    ticker,
-                    toStartOfMinute(sip_timestamp) as timestamp,
-                    round(coalesce(nullIf(avg(price), 0), 2), 2) as avg_trade_price,
-                    round(coalesce(nullIf(min(price), 0), 2), 2) as min_trade_price,
-                    round(coalesce(nullIf(max(price), 0), 2), 2) as max_trade_price,
-                    coalesce(nullIf(sum(size), 0), 2) as total_trade_size,
-                    coalesce(nullIf(count(*), 0), 2) as trade_count,
-                    coalesce(nullIf(arrayStringConcat(arrayMap(x -> toString(x), arrayFlatten([coalesce(groupArray(conditions), [])]))), ''), '2') AS trade_conditions,
-                    coalesce(nullIf(argMax(exchange, sip_timestamp), 0), 2) as trade_exchange
-                FROM {db.database}.stock_trades
-                WHERE toDate(sip_timestamp) = '{today_str}'
-                GROUP BY ticker, timestamp
-                ORDER BY timestamp ASC, ticker ASC
-            ),
-            -- Get indicator data
-            indicator_metrics AS (
-                SELECT
-                    ticker,
-                    timestamp,
-                    round(coalesce(nullIf(any(if(indicator_type = 'SMA_5', value, NULL)), 0), 2), 2) as sma_5,
-                    round(coalesce(nullIf(any(if(indicator_type = 'SMA_9', value, NULL)), 0), 2), 2) as sma_9,
-                    round(coalesce(nullIf(any(if(indicator_type = 'SMA_12', value, NULL)), 0), 2), 2) as sma_12,
-                    round(coalesce(nullIf(any(if(indicator_type = 'SMA_20', value, NULL)), 0), 2), 2) as sma_20,
-                    round(coalesce(nullIf(any(if(indicator_type = 'SMA_50', value, NULL)), 0), 2), 2) as sma_50,
-                    round(coalesce(nullIf(any(if(indicator_type = 'SMA_100', value, NULL)), 0), 2), 2) as sma_100,
-                    round(coalesce(nullIf(any(if(indicator_type = 'SMA_200', value, NULL)), 0), 2), 2) as sma_200,
-                    round(coalesce(nullIf(any(if(indicator_type = 'EMA_9', value, NULL)), 0), 2), 2) as ema_9,
-                    round(coalesce(nullIf(any(if(indicator_type = 'EMA_12', value, NULL)), 0), 2), 2) as ema_12,
-                    round(coalesce(nullIf(any(if(indicator_type = 'EMA_20', value, NULL)), 0), 2), 2) as ema_20,
-                    round(coalesce(nullIf(any(if(indicator_type = 'MACD', value, NULL)), 0), 2), 2) as macd_value,
-                    round(coalesce(nullIf(any(if(indicator_type = 'MACD', signal, NULL)), 0), 2), 2) as macd_signal,
-                    round(coalesce(nullIf(any(if(indicator_type = 'MACD', histogram, NULL)), 0), 2), 2) as macd_histogram,
-                    round(coalesce(nullIf(any(if(indicator_type = 'RSI', value, NULL)), 0), 2), 2) as rsi_14
-                FROM {db.database}.stock_indicators
-                WHERE toDate(timestamp) = '{today_str}'
-                GROUP BY ticker, timestamp
-                ORDER BY timestamp ASC, ticker ASC
+             trade_metrics AS (
+                 SELECT ticker, toStartOfMinute(sip_timestamp) as timestamp,
+                        round(coalesce(nullIf(avg(price), 0), 2), 2) as avg_trade_price, round(coalesce(nullIf(min(price), 0), 2), 2) as min_trade_price, round(coalesce(nullIf(max(price), 0), 2), 2) as max_trade_price,
+                        coalesce(nullIf(sum(size), 0), 2) as total_trade_size, coalesce(nullIf(count(*), 0), 2) as trade_count,
+                        coalesce(nullIf(arrayStringConcat(arrayMap(x -> toString(x), arrayFlatten([coalesce(groupArray(conditions), [])]))), ''), '2') AS trade_conditions,
+                        coalesce(nullIf(argMax(exchange, sip_timestamp), 0), 2) as trade_exchange
+                 FROM `{db.database}`.stock_trades
+                 WHERE toDate(sip_timestamp) = '{today_str_utc}' # Filter by UTC date
+                 GROUP BY ticker, timestamp ORDER BY timestamp ASC, ticker ASC
+             ),
+             indicator_metrics AS (
+                 SELECT ticker, timestamp,
+                       round(coalesce(nullIf(any(if(indicator_type = 'SMA_5', value, NULL)), 0), 2), 2) as sma_5, round(coalesce(nullIf(any(if(indicator_type = 'SMA_9', value, NULL)), 0), 2), 2) as sma_9, round(coalesce(nullIf(any(if(indicator_type = 'SMA_12', value, NULL)), 0), 2), 2) as sma_12, round(coalesce(nullIf(any(if(indicator_type = 'SMA_20', value, NULL)), 0), 2), 2) as sma_20, round(coalesce(nullIf(any(if(indicator_type = 'SMA_50', value, NULL)), 0), 2), 2) as sma_50, round(coalesce(nullIf(any(if(indicator_type = 'SMA_100', value, NULL)), 0), 2), 2) as sma_100, round(coalesce(nullIf(any(if(indicator_type = 'SMA_200', value, NULL)), 0), 2), 2) as sma_200,
+                       round(coalesce(nullIf(any(if(indicator_type = 'EMA_9', value, NULL)), 0), 2), 2) as ema_9, round(coalesce(nullIf(any(if(indicator_type = 'EMA_12', value, NULL)), 0), 2), 2) as ema_12, round(coalesce(nullIf(any(if(indicator_type = 'EMA_20', value, NULL)), 0), 2), 2) as ema_20,
+                       round(coalesce(nullIf(any(if(indicator_type = 'MACD', value, NULL)), 0), 2), 2) as macd_value, round(coalesce(nullIf(any(if(indicator_type = 'MACD', signal, NULL)), 0), 2), 2) as macd_signal, round(coalesce(nullIf(any(if(indicator_type = 'MACD', histogram, NULL)), 0), 2), 2) as macd_histogram,
+                       round(coalesce(nullIf(any(if(indicator_type = 'RSI', value, NULL)), 0), 2), 2) as rsi_14
+                 FROM `{db.database}`.stock_indicators
+                 WHERE toDate(timestamp) = '{today_str_utc}' # Filter by UTC date
+                 GROUP BY ticker, timestamp ORDER BY timestamp ASC, ticker ASC
             )
-            
             SELECT
-                b.uni_id,
-                b.ticker,
-                b.timestamp,
-                b.open,
-                b.high,
-                b.low,
-                b.close,
-                b.volume,
-                b.vwap,
-                b.transactions,
-                -- Price metrics
-                b.price_diff,
-                b.max_price_diff,
-                multiIf(
-                    b.price_diff <= -1, 0,
-                    b.price_diff <= -0.5, 1,
-                    b.price_diff <= 0, 2,
-                    b.price_diff <= 0.5, 3,
-                    b.price_diff <= 1, 4,
-                    5
-                ) as target,
-                -- Quote metrics
-                q.avg_bid_price,
-                q.avg_ask_price,
-                q.min_bid_price,
-                q.max_ask_price,
-                q.total_bid_size,
-                q.total_ask_size,
-                q.quote_count,
-                q.quote_conditions,
-                q.ask_exchange,
-                q.bid_exchange,
-                -- Trade metrics
-                t.avg_trade_price,
-                t.min_trade_price,
-                t.max_trade_price,
-                t.total_trade_size,
-                t.trade_count,
-                t.trade_conditions,
-                t.trade_exchange,
-                -- Technical indicators
-                i.sma_5,
-                i.sma_9,
-                i.sma_12,
-                i.sma_20,
-                i.sma_50,
-                i.sma_100,
-                i.sma_200,
-                i.ema_9,
-                i.ema_12,
-                i.ema_20,
-                i.macd_value,
-                i.macd_signal,
-                i.macd_histogram,
-                i.rsi_14,
-                -- Daily metrics
-                b.daily_high,
-                b.daily_low,
-                b.previous_close,
-                -- TR metrics
-                b.daily_high - b.daily_low as tr_current,
-                b.daily_high - b.previous_close as tr_high_close,
-                b.daily_low - b.previous_close as tr_low_close,
-                greatest(
-                    b.daily_high - b.daily_low,
-                    abs(b.daily_high - b.previous_close),
-                    abs(b.daily_low - b.previous_close)
-                ) as tr_value,
-                avg(greatest(
-                    b.daily_high - b.daily_low,
-                    abs(b.daily_high - b.previous_close),
-                    abs(b.daily_low - b.previous_close)
-                )) OVER (PARTITION BY b.ticker ORDER BY b.timestamp ROWS BETWEEN 13 PRECEDING AND CURRENT ROW) as atr_value
+                 b.uni_id, b.ticker, b.timestamp, b.open, b.high, b.low, b.close, b.volume, b.vwap, b.transactions, b.price_diff, b.max_price_diff,
+                 multiIf( b.price_diff <= -1, 0, b.price_diff <= -0.5, 1, b.price_diff <= 0, 2, b.price_diff <= 0.5, 3, b.price_diff <= 1, 4, 5 ) as target,
+                 q.avg_bid_price, q.avg_ask_price, q.min_bid_price, q.max_ask_price, q.total_bid_size, q.total_ask_size, q.quote_count, q.quote_conditions, q.ask_exchange, q.bid_exchange,
+                 t.avg_trade_price, t.min_trade_price, t.max_trade_price, t.total_trade_size, t.trade_count, t.trade_conditions, t.trade_exchange,
+                 i.sma_5, i.sma_9, i.sma_12, i.sma_20, i.sma_50, i.sma_100, i.sma_200, i.ema_9, i.ema_12, i.ema_20, i.macd_value, i.macd_signal, i.macd_histogram, i.rsi_14,
+                 b.daily_high, b.daily_low, b.previous_close,
+                 b.daily_high - b.daily_low as tr_current, b.daily_high - b.previous_close as tr_high_close, b.daily_low - b.previous_close as tr_low_close,
+                 greatest( b.daily_high - b.daily_low, abs(b.daily_high - b.previous_close), abs(b.daily_low - b.previous_close) ) as tr_value,
+                 avg(greatest( b.daily_high - b.daily_low, abs(b.daily_high - b.previous_close), abs(b.daily_low - b.previous_close) )) OVER (PARTITION BY b.ticker ORDER BY b.timestamp ROWS BETWEEN 13 PRECEDING AND CURRENT ROW) as atr_value
             FROM base_data b
             LEFT JOIN quote_metrics q ON b.ticker = q.ticker AND b.timestamp = q.timestamp
             LEFT JOIN trade_metrics t ON b.ticker = t.ticker AND b.timestamp = t.timestamp
@@ -1394,120 +1167,73 @@ async def insert_latest_data(db: ClickHouseDB, from_date: datetime, to_date: dat
             ORDER BY b.timestamp ASC, b.ticker ASC
             """
             db.client.command(insert_query)
-            print(f"Master table updated successfully for {today_str}")
-            
-            # Also update the normalized table with the same approach as master.py
+            print(f"Master table updated successfully for UTC date: {today_str_utc}")
+
+            # Also update the normalized table for today's UTC date
             try:
                 # First, clean up today's data in normalized table
                 drop_norm_query = f"""
-                ALTER TABLE {db.database}.{config.TABLE_STOCK_NORMALIZED}
-                DELETE WHERE toDate(timestamp) = '{today_str}'
+                ALTER TABLE `{db.database}`.`{config.TABLE_STOCK_NORMALIZED}`
+                DELETE WHERE toDate(timestamp) = '{today_str_utc}'
                 """
-                db.client.command(drop_norm_query)
-                
-                # Insert into normalized table using the same technique as in master.py
+                db.client.command(drop_norm_query, settings={'mutations_sync': 2}) # Wait
+
+                # Insert into normalized table using the consistent approach
+                 # Filter source master table by today's UTC date
                 insert_norm_query = f"""
-                INSERT INTO {db.database}.{config.TABLE_STOCK_NORMALIZED}
+                INSERT INTO `{db.database}`.`{config.TABLE_STOCK_NORMALIZED}`
+                WITH stats AS (
+                    SELECT
+                        m.*,
+                        avg(m.open) OVER w as avg_open, stddevPop(m.open) OVER w as std_open, avg(m.high) OVER w as avg_high, stddevPop(m.high) OVER w as std_high,
+                        avg(m.low) OVER w as avg_low, stddevPop(m.low) OVER w as std_low, avg(m.close) OVER w as avg_close, stddevPop(m.close) OVER w as std_close,
+                        avg(m.volume) OVER w as avg_volume, stddevPop(m.volume) OVER w as std_volume, avg(m.vwap) OVER w as avg_vwap, stddevPop(m.vwap) OVER w as std_vwap,
+                        avg(m.transactions) OVER w as avg_transactions, stddevPop(m.transactions) OVER w as std_transactions, avg(m.price_diff) OVER w as avg_price_diff, stddevPop(m.price_diff) OVER w as std_price_diff,
+                        avg(m.max_price_diff) OVER w as avg_max_price_diff, stddevPop(m.max_price_diff) OVER w as std_max_price_diff, avg(m.avg_bid_price) OVER w as avg_avg_bid_price, stddevPop(m.avg_bid_price) OVER w as std_avg_bid_price,
+                        avg(m.avg_ask_price) OVER w as avg_avg_ask_price, stddevPop(m.avg_ask_price) OVER w as std_avg_ask_price, avg(m.min_bid_price) OVER w as avg_min_bid_price, stddevPop(m.min_bid_price) OVER w as std_min_bid_price,
+                        avg(m.max_ask_price) OVER w as avg_max_ask_price, stddevPop(m.max_ask_price) OVER w as std_max_ask_price, avg(m.total_bid_size) OVER w as avg_total_bid_size, stddevPop(m.total_bid_size) OVER w as std_total_bid_size,
+                        avg(m.total_ask_size) OVER w as avg_total_ask_size, stddevPop(m.total_ask_size) OVER w as std_total_ask_size, avg(m.quote_count) OVER w as avg_quote_count, stddevPop(m.quote_count) OVER w as std_quote_count,
+                        avg(m.avg_trade_price) OVER w as avg_avg_trade_price, stddevPop(m.avg_trade_price) OVER w as std_avg_trade_price, avg(m.min_trade_price) OVER w as avg_min_trade_price, stddevPop(m.min_trade_price) OVER w as std_min_trade_price,
+                        avg(m.max_trade_price) OVER w as avg_max_trade_price, stddevPop(m.max_trade_price) OVER w as std_max_trade_price, avg(m.total_trade_size) OVER w as avg_total_trade_size, stddevPop(m.total_trade_size) OVER w as std_total_trade_size,
+                        avg(m.trade_count) OVER w as avg_trade_count, stddevPop(m.trade_count) OVER w as std_trade_count, avg(m.sma_5) OVER w as avg_sma_5, stddevPop(m.sma_5) OVER w as std_sma_5,
+                        avg(m.sma_9) OVER w as avg_sma_9, stddevPop(m.sma_9) OVER w as std_sma_9, avg(m.sma_12) OVER w as avg_sma_12, stddevPop(m.sma_12) OVER w as std_sma_12,
+                        avg(m.sma_20) OVER w as avg_sma_20, stddevPop(m.sma_20) OVER w as std_sma_20, avg(m.sma_50) OVER w as avg_sma_50, stddevPop(m.sma_50) OVER w as std_sma_50,
+                        avg(m.sma_100) OVER w as avg_sma_100, stddevPop(m.sma_100) OVER w as std_sma_100, avg(m.sma_200) OVER w as avg_sma_200, stddevPop(m.sma_200) OVER w as std_sma_200,
+                        avg(m.ema_9) OVER w as avg_ema_9, stddevPop(m.ema_9) OVER w as std_ema_9, avg(m.ema_12) OVER w as avg_ema_12, stddevPop(m.ema_12) OVER w as std_ema_12,
+                        avg(m.ema_20) OVER w as avg_ema_20, stddevPop(m.ema_20) OVER w as std_ema_20, avg(m.macd_value) OVER w as avg_macd_value, stddevPop(m.macd_value) OVER w as std_macd_value,
+                        avg(m.macd_signal) OVER w as avg_macd_signal, stddevPop(m.macd_signal) OVER w as std_macd_signal, avg(m.macd_histogram) OVER w as avg_macd_histogram, stddevPop(m.macd_histogram) OVER w as std_macd_histogram,
+                        avg(m.rsi_14) OVER w as avg_rsi_14, stddevPop(m.rsi_14) OVER w as std_rsi_14, avg(m.daily_high) OVER w as avg_daily_high, stddevPop(m.daily_high) OVER w as std_daily_high,
+                        avg(m.daily_low) OVER w as avg_daily_low, stddevPop(m.daily_low) OVER w as std_daily_low, avg(m.previous_close) OVER w as avg_previous_close, stddevPop(m.previous_close) OVER w as std_previous_close,
+                        avg(m.tr_current) OVER w as avg_tr_current, stddevPop(m.tr_current) OVER w as std_tr_current, avg(m.tr_high_close) OVER w as avg_tr_high_close, stddevPop(m.tr_high_close) OVER w as std_tr_high_close,
+                        avg(m.tr_low_close) OVER w as avg_tr_low_close, stddevPop(m.tr_low_close) OVER w as std_tr_low_close, avg(m.tr_value) OVER w as avg_tr_value, stddevPop(m.tr_value) OVER w as std_tr_value,
+                        avg(m.atr_value) OVER w as avg_atr_value, stddevPop(m.atr_value) OVER w as std_atr_value
+                    FROM `{db.database}`.`{config.TABLE_STOCK_MASTER}` m
+                    # Use recent history AND today's UTC date for stats
+                    WHERE timestamp >= (toDateTime('{today_str_utc}', 'UTC') - INTERVAL 10 DAY)
+                    AND timestamp < (toDateTime('{today_str_utc}', 'UTC') + INTERVAL 1 DAY)
+                    WINDOW w AS (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 100 PRECEDING AND CURRENT ROW)
+                )
                 SELECT
-                    uni_id,
-                    ticker,
-                    timestamp,
-                    target,
-                    quote_conditions,
-                    /* Hash the trade_conditions string to a numeric value */
-                    modulo(cityHash64(coalesce(trade_conditions, '')), 10000) as trade_conditions,
-                    ask_exchange,
-                    bid_exchange,
-                    trade_exchange,
-                    -- Normalize all values using same approach as master.py
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(open, 0), 2) / 1000))), 2) as open,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(high, 0), 2) / 1000))), 2) as high,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(low, 0), 2) / 1000))), 2) as low,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(close, 0), 2) / 1000))), 2) as close,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(volume, 0), 2) / 1000000))), 2) as volume,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(vwap, 0), 2) / 1000))), 2) as vwap,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(transactions, 0), 2) / 1000))), 2) as transactions,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(price_diff, 0), 2) / 10))), 2) as price_diff,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(max_price_diff, 0), 2) / 10))), 2) as max_price_diff,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(avg_bid_price, 0), 2) / 1000))), 2) as avg_bid_price,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(avg_ask_price, 0), 2) / 1000))), 2) as avg_ask_price,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(min_bid_price, 0), 2) / 1000))), 2) as min_bid_price,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(max_ask_price, 0), 2) / 1000))), 2) as max_ask_price,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(total_bid_size, 0), 2) / 100000))), 2) as total_bid_size,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(total_ask_size, 0), 2) / 100000))), 2) as total_ask_size,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(quote_count, 0), 2) / 1000))), 2) as quote_count,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(avg_trade_price, 0), 2) / 1000))), 2) as avg_trade_price,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(min_trade_price, 0), 2) / 1000))), 2) as min_trade_price,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(max_trade_price, 0), 2) / 1000))), 2) as max_trade_price,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(total_trade_size, 0), 2) / 100000))), 2) as total_trade_size,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(trade_count, 0), 2) / 1000))), 2) as trade_count,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_5, 0), 2) / 1000))), 2) as sma_5,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_9, 0), 2) / 1000))), 2) as sma_9,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_12, 0), 2) / 1000))), 2) as sma_12,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_20, 0), 2) / 1000))), 2) as sma_20,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_50, 0), 2) / 1000))), 2) as sma_50,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_100, 0), 2) / 1000))), 2) as sma_100,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_200, 0), 2) / 1000))), 2) as sma_200,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(ema_9, 0), 2) / 1000))), 2) as ema_9,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(ema_12, 0), 2) / 1000))), 2) as ema_12,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(ema_20, 0), 2) / 1000))), 2) as ema_20,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(macd_value, 0), 2) / 10))), 2) as macd_value,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(macd_signal, 0), 2) / 10))), 2) as macd_signal,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(macd_histogram, 0), 2) / 10))), 2) as macd_histogram,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(rsi_14, 0), 2) / 100))), 2) as rsi_14,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(daily_high, 0), 2) / 1000))), 2) as daily_high,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(daily_low, 0), 2) / 1000))), 2) as daily_low,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(previous_close, 0), 2) / 1000))), 2) as previous_close,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_current, 0), 2) / 100))), 2) as tr_current,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_high_close, 0), 2) / 100))), 2) as tr_high_close,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_low_close, 0), 2) / 100))), 2) as tr_low_close,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_value, 0), 2) / 100))), 2) as tr_value,
-                    round(5 / (1 + exp(-5 * (coalesce(nullIf(atr_value, 0), 2) / 100))), 2) as atr_value
-                FROM {db.database}.{config.TABLE_STOCK_MASTER}
-                WHERE toDate(timestamp) = '{today_str}'
+                    uni_id, ticker, timestamp, target, quote_conditions, modulo(cityHash64(coalesce(trade_conditions, '')), 10000) as trade_conditions, ask_exchange, bid_exchange, trade_exchange,
+                    round(5 / (1 + exp(-5 * (coalesce(nullIf(open, 0), 2) / 1000))), 2) as open, round(5 / (1 + exp(-5 * (coalesce(nullIf(high, 0), 2) / 1000))), 2) as high, round(5 / (1 + exp(-5 * (coalesce(nullIf(low, 0), 2) / 1000))), 2) as low, round(5 / (1 + exp(-5 * (coalesce(nullIf(close, 0), 2) / 1000))), 2) as close, round(5 / (1 + exp(-5 * (coalesce(nullIf(volume, 0), 2) / 1000000))), 2) as volume, round(5 / (1 + exp(-5 * (coalesce(nullIf(vwap, 0), 2) / 1000))), 2) as vwap, round(5 / (1 + exp(-5 * (coalesce(nullIf(transactions, 0), 2) / 1000))), 2) as transactions, round(5 / (1 + exp(-5 * (coalesce(nullIf(price_diff, 0), 2) / 10))), 2) as price_diff, round(5 / (1 + exp(-5 * (coalesce(nullIf(max_price_diff, 0), 2) / 10))), 2) as max_price_diff, round(5 / (1 + exp(-5 * (coalesce(nullIf(avg_bid_price, 0), 2) / 1000))), 2) as avg_bid_price, round(5 / (1 + exp(-5 * (coalesce(nullIf(avg_ask_price, 0), 2) / 1000))), 2) as avg_ask_price, round(5 / (1 + exp(-5 * (coalesce(nullIf(min_bid_price, 0), 2) / 1000))), 2) as min_bid_price, round(5 / (1 + exp(-5 * (coalesce(nullIf(max_ask_price, 0), 2) / 1000))), 2) as max_ask_price, round(5 / (1 + exp(-5 * (coalesce(nullIf(total_bid_size, 0), 2) / 100000))), 2) as total_bid_size, round(5 / (1 + exp(-5 * (coalesce(nullIf(total_ask_size, 0), 2) / 100000))), 2) as total_ask_size, round(5 / (1 + exp(-5 * (coalesce(nullIf(quote_count, 0), 2) / 1000))), 2) as quote_count, round(5 / (1 + exp(-5 * (coalesce(nullIf(avg_trade_price, 0), 2) / 1000))), 2) as avg_trade_price, round(5 / (1 + exp(-5 * (coalesce(nullIf(min_trade_price, 0), 2) / 1000))), 2) as min_trade_price, round(5 / (1 + exp(-5 * (coalesce(nullIf(max_trade_price, 0), 2) / 1000))), 2) as max_trade_price, round(5 / (1 + exp(-5 * (coalesce(nullIf(total_trade_size, 0), 2) / 100000))), 2) as total_trade_size, round(5 / (1 + exp(-5 * (coalesce(nullIf(trade_count, 0), 2) / 1000))), 2) as trade_count, round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_5, 0), 2) / 1000))), 2) as sma_5, round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_9, 0), 2) / 1000))), 2) as sma_9, round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_12, 0), 2) / 1000))), 2) as sma_12, round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_20, 0), 2) / 1000))), 2) as sma_20, round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_50, 0), 2) / 1000))), 2) as sma_50, round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_100, 0), 2) / 1000))), 2) as sma_100, round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_200, 0), 2) / 1000))), 2) as sma_200, round(5 / (1 + exp(-5 * (coalesce(nullIf(ema_9, 0), 2) / 1000))), 2) as ema_9, round(5 / (1 + exp(-5 * (coalesce(nullIf(ema_12, 0), 2) / 1000))), 2) as ema_12, round(5 / (1 + exp(-5 * (coalesce(nullIf(ema_20, 0), 2) / 1000))), 2) as ema_20, round(5 / (1 + exp(-5 * (coalesce(nullIf(macd_value, 0), 2) / 10))), 2) as macd_value, round(5 / (1 + exp(-5 * (coalesce(nullIf(macd_signal, 0), 2) / 10))), 2) as macd_signal, round(5 / (1 + exp(-5 * (coalesce(nullIf(macd_histogram, 0), 2) / 10))), 2) as macd_histogram, round(5 / (1 + exp(-5 * (coalesce(nullIf(rsi_14, 0), 2) / 100))), 2) as rsi_14, round(5 / (1 + exp(-5 * (coalesce(nullIf(daily_high, 0), 2) / 1000))), 2) as daily_high, round(5 / (1 + exp(-5 * (coalesce(nullIf(daily_low, 0), 2) / 1000))), 2) as daily_low, round(5 / (1 + exp(-5 * (coalesce(nullIf(previous_close, 0), 2) / 1000))), 2) as previous_close, round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_current, 0), 2) / 100))), 2) as tr_current, round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_high_close, 0), 2) / 100))), 2) as tr_high_close, round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_low_close, 0), 2) / 100))), 2) as tr_low_close, round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_value, 0), 2) / 100))), 2) as tr_value, round(5 / (1 + exp(-5 * (coalesce(nullIf(atr_value, 0), 2) / 100))), 2) as atr_value
+                FROM stats
+                WHERE toDate(timestamp) = '{today_str_utc}' # Filter for target UTC date
                 ORDER BY timestamp ASC, ticker ASC
                 """
                 db.client.command(insert_norm_query)
-                print(f"Normalized table updated successfully for {today_str}")
+                print(f"Normalized table updated successfully for UTC date: {today_str_utc}")
             except Exception as e:
-                print(f"Warning: Error updating normalized table: {str(e)}")
+                print(f"Warning: Error updating normalized table for {today_str_utc}: {str(e)}")
                 print("Continuing with execution despite normalized table update error")
-            
+
         except Exception as e:
-            print(f"Error in SQL execution: {str(e)}")
-            print("Using simplified approach as fallback...")
-            
-            # Try a simpler approach if the complex query fails
-            # Check if the master table exists, if not create it
-            check_table_query = f"SELECT 1 FROM system.tables WHERE database = '{db.database}' AND name = '{config.TABLE_STOCK_MASTER}'"
-            result = db.client.query(check_table_query)
-            if not result.result_rows:
-                print(f"Master table does not exist, initializing it first...")
-                await init_master_v2(db)
-            
-            # Insert a simple marker record to indicate the data was processed
-            print("Using fallback approach to ensure data processing is recorded")
-            marker_query = f"""
-            INSERT INTO {db.database}.{config.TABLE_STOCK_MASTER}
-            SELECT 
-                cityHash64('SYSTEM', toString(now())),
-                'SYSTEM',
-                now(),
-                NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-                NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'SYSTEM_UPDATE', NULL, NULL,
-                NULL, NULL, NULL, NULL, NULL, 'SYSTEM_UPDATE', NULL,
-                NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-                NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
-            """
-            try:
-                db.client.command(marker_query)
-                print("Inserted system marker record to indicate processing occurred")
-            except Exception as e:
-                print(f"Error even with simplified approach: {str(e)}")
-                print("Continuing with operation despite errors")
-        
-        print(f"Latest data insertion complete for {from_date.strftime('%Y-%m-%d %H:%M')} - {to_date.strftime('%Y-%m-%d %H:%M')}")
-        
+            # Fallback logic removed as it's unlikely to be helpful now
+            print(f"Error during SQL execution for {today_str_utc}: {str(e)}")
+            print("Continuing with operation despite errors")
+
+        # Log completion with UTC range
+        print(f"Latest data insertion complete for UTC period {from_date.strftime('%Y-%m-%d %H:%M:%S %Z')} - {to_date.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+
     except Exception as e:
         print(f"Error inserting latest data: {str(e)}")
         # Don't re-raise the exception to allow the process to continue

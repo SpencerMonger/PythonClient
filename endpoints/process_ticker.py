@@ -7,7 +7,6 @@ import asyncio
 import time
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
-import pytz
 
 from endpoints.db import ClickHouseDB
 from endpoints import bars, trades, quotes, news, indicators, bars_daily
@@ -15,177 +14,122 @@ from endpoints.polygon_client import close_session
 
 async def process_ticker_with_connection(ticker: str, from_date: datetime, to_date: datetime, store_latest_only: bool = False) -> None:
     """
-    Process a single ticker with its own dedicated database connection to enable concurrent processing.
-    
-    Args:
-        ticker: Ticker symbol
-        from_date: Start date
-        to_date: End date
-        store_latest_only: Whether to only store the latest row
+    Process a single ticker with its own dedicated database connection.
+    Passes the connection down to the main processing function.
     """
-    ticker_db = ClickHouseDB()
+    ticker_db = None # Initialize
     try:
+        ticker_db = ClickHouseDB() # Create connection once per ticker task
         print(f"\n{'='*50}")
         print(f"Processing {ticker}...")
-        print(f"Time range: {from_date.strftime('%Y-%m-%d %H:%M:%S')} to {to_date.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"UTC Time range: {from_date.strftime('%Y-%m-%d %H:%M:%S %Z')} to {to_date.strftime('%Y-%m-%d %H:%M:%S %Z')}")
         start_time = time.time()
-        
-        # Process the ticker with the dedicated connection
+
+        # Pass the created ticker_db connection to process_ticker
         await process_ticker(ticker_db, ticker, from_date, to_date, store_latest_only)
-        
+
         print(f"Finished processing {ticker} in {time.time() - start_time:.2f} seconds")
         print('='*50)
     except Exception as e:
         print(f"Error processing ticker {ticker}: {str(e)}")
+        import traceback
+        print(traceback.format_exc())
     finally:
-        # Make sure to close the DB connection when done
-        ticker_db.close()
+        # Make sure to close the DB connection when done or if error occurs
+        if ticker_db:
+            ticker_db.close()
+            # print(f"Closed DB connection for {ticker}") # Debug
 
 async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_date: datetime, store_latest_only: bool = False) -> None:
     """
-    Process all data for a ticker between dates
-    
-    Args:
-        db: Database connection
-        ticker: Ticker symbol
-        from_date: Start date
-        to_date: End date
-        store_latest_only: Whether to only store the latest row
+    Process all data for a ticker using a passed DB connection.
+    Fetches data concurrently, then stores sequentially using the single connection.
+    Relies on outer timeout control.
     """
+    if not db or not db.client: # Check if db connection is valid
+         print(f"Error: Invalid database connection passed to process_ticker for {ticker}")
+         return
+
     try:
         ticker_start_time = time.time()
-        
-        # For live mode, adjust to last minute for trades and quotes
-        et_tz = pytz.timezone('US/Eastern')
-        trade_from = from_date if from_date.tzinfo is not None else et_tz.localize(from_date)
-        trade_to = to_date if to_date.tzinfo is not None else et_tz.localize(to_date)
-        
-        if store_latest_only:
-            trade_from = datetime(trade_to.year, trade_to.month, trade_to.day, 
-                                trade_to.hour, trade_to.minute, 0, 
-                                tzinfo=trade_to.tzinfo)
-            trade_to = trade_from + timedelta(minutes=1)
-        
-        # Create tasks for all data fetching operations to run in parallel
-        # Focus on bars and trades which are the most important for live mode
-        fetch_tasks = {
-            'bars': asyncio.create_task(asyncio.wait_for(
-                bars.fetch_bars(ticker, from_date, to_date),
-                timeout=3.0  # 3 second timeout
-            )),
-            'trades': asyncio.create_task(asyncio.wait_for(
-                trades.fetch_trades(ticker, trade_from, trade_to),
-                timeout=3.0  # 3 second timeout
-            )),
-            'quotes': asyncio.create_task(asyncio.wait_for(
-                quotes.fetch_quotes(ticker, trade_from, trade_to),
-                timeout=3.0  # 3 second timeout
-            ))
+
+        fetch_from_utc = from_date
+        fetch_to_utc = to_date
+
+        # Create tasks for all data fetching operations
+        fetch_tasks_dict = {
+            'bars': asyncio.create_task(bars.fetch_bars(ticker, fetch_from_utc, fetch_to_utc)),
+            'trades': asyncio.create_task(trades.fetch_trades(ticker, fetch_from_utc, fetch_to_utc)),
+            'quotes': asyncio.create_task(quotes.fetch_quotes(ticker, fetch_from_utc, fetch_to_utc)),
+            'indicators': asyncio.create_task(indicators.fetch_all_indicators(ticker, fetch_from_utc, fetch_to_utc))
         }
-        
-        # Create less critical tasks with lower priority
-        if not store_latest_only:  # Historical mode loads all data
-            fetch_tasks['daily_bars'] = asyncio.create_task(asyncio.wait_for(
-                bars_daily.fetch_bars(ticker, from_date, to_date),
-                timeout=3.0
-            ))
-            fetch_tasks['news'] = asyncio.create_task(asyncio.wait_for(
-                news.fetch_news(ticker, from_date, to_date),
-                timeout=2.0
-            ))
-            fetch_tasks['indicators'] = asyncio.create_task(asyncio.wait_for(
-                indicators.fetch_all_indicators(ticker, from_date, to_date),
-                timeout=2.0
-            ))
-        
-        # Process and store critical data first - SEQUENTIALLY to avoid concurrent DB access errors
-        # Each store operation gets its own database connection
-        try:
-            bar_data = await fetch_tasks['bars']
-            if bar_data:
-                if store_latest_only and bar_data:
-                    bar_data = [bar_data[-1]]  # Keep only the last bar
-                # Create a dedicated connection for this operation
-                bar_db = ClickHouseDB()
-                try:
-                    await bars.store_bars(bar_db, bar_data)
-                finally:
-                    bar_db.close()
-        except (asyncio.TimeoutError, Exception) as e:
-            print(f"Error with bars for {ticker}: {type(e).__name__}")
-        
-        try:
-            trade_data = await fetch_tasks['trades']
-            if trade_data:
-                # Create a dedicated connection for this operation
-                trade_db = ClickHouseDB()
-                try:
-                    await trades.store_trades(trade_db, trade_data)
-                finally:
-                    trade_db.close()
-        except (asyncio.TimeoutError, Exception) as e:
-            print(f"Error with trades for {ticker}: {type(e).__name__}")
-        
-        try:
-            quote_data = await fetch_tasks['quotes']
-            if quote_data:
-                # Create a dedicated connection for this operation
-                quote_db = ClickHouseDB()
-                try:
-                    await quotes.store_quotes(quote_db, quote_data)
-                finally:
-                    quote_db.close()
-        except (asyncio.TimeoutError, Exception) as e:
-            print(f"Error with quotes for {ticker}: {type(e).__name__}")
-        
-        # Only process less critical data if we're not in live mode
+        task_keys = ['bars', 'trades', 'quotes', 'indicators'] # Order for gather
+
         if not store_latest_only:
-            try:
-                daily_bar_data = await fetch_tasks['daily_bars']
-                if daily_bar_data:
-                    # Create a dedicated connection for this operation
-                    daily_db = ClickHouseDB()
-                    try:
-                        await bars_daily.store_bars(daily_db, daily_bar_data, "historical")
-                    finally:
-                        daily_db.close()
-            except (asyncio.TimeoutError, Exception) as e:
-                print(f"Error with daily bars for {ticker}: {type(e).__name__}")
-            
-            try:
-                news_data = await fetch_tasks['news']
-                if news_data:
-                    # Create a dedicated connection for this operation
-                    news_db = ClickHouseDB()
-                    try:
-                        await news.store_news(news_db, news_data)
-                    finally:
-                        news_db.close()
-            except (asyncio.TimeoutError, Exception) as e:
-                print(f"Error with news for {ticker}: {type(e).__name__}")
-            
-            try:
-                indicator_data = await fetch_tasks['indicators']
-                if indicator_data:
-                    # Group by indicator type and keep latest for each
-                    latest_indicators = {}
-                    for indicator in indicator_data:
-                        indicator_type = indicator['indicator_type']
-                        if indicator_type not in latest_indicators or indicator['timestamp'] > latest_indicators[indicator_type]['timestamp']:
-                            latest_indicators[indicator_type] = indicator
-                    indicator_data = list(latest_indicators.values())
-                    
-                    # Create a dedicated connection for this operation
-                    indicators_db = ClickHouseDB()
-                    try:
-                        await indicators.store_indicators(indicators_db, indicator_data)
-                    finally:
-                        indicators_db.close()
-            except (asyncio.TimeoutError, Exception) as e:
-                print(f"Error with indicators for {ticker}: {type(e).__name__}")
-        
-        print(f"Processed {ticker} in {time.time() - ticker_start_time:.2f}s")
-        
+            fetch_tasks_dict['daily_bars'] = asyncio.create_task(bars_daily.fetch_bars(ticker, fetch_from_utc, fetch_to_utc))
+            fetch_tasks_dict['news'] = asyncio.create_task(news.fetch_news(ticker, fetch_from_utc, fetch_to_utc))
+            task_keys.extend(['daily_bars', 'news'])
+
+        # Gather all fetch results concurrently, handle errors
+        print(f"Gathering fetch results for {ticker}...")
+        results = await asyncio.gather(
+            *(fetch_tasks_dict[key] for key in task_keys),
+            return_exceptions=True
+        )
+        print(f"Finished gathering fetch results for {ticker}.")
+
+        # Assign results, handling potential exceptions from gather
+        results_dict = dict(zip(task_keys, results))
+
+        def get_result(key):
+            res = results_dict.get(key)
+            if isinstance(res, Exception):
+                print(f"Error fetching {key} for {ticker}: {type(res).__name__} - {res}")
+                return None
+            return res
+
+        bar_data = get_result('bars')
+        trade_data = get_result('trades')
+        quote_data = get_result('quotes')
+        indicator_data = get_result('indicators')
+        daily_bar_data = get_result('daily_bars') if not store_latest_only else None
+        news_data = get_result('news') if not store_latest_only else None
+
+
+        # --- Storage (using the single passed DB connection) ---
+        print(f"Starting storage for {ticker}...")
+        storage_start_time = time.time()
+
+        if bar_data:
+            if store_latest_only and len(bar_data) > 0: bar_data = [bar_data[-1]]
+            try: await bars.store_bars(db, bar_data) # Use passed db
+            except Exception as e: print(f"Error storing bars for {ticker}: {e}")
+
+        if trade_data:
+            try: await trades.store_trades(db, trade_data) # Use passed db
+            except Exception as e: print(f"Error storing trades for {ticker}: {e}")
+
+        if quote_data:
+            try: await quotes.store_quotes(db, quote_data) # Use passed db
+            except Exception as e: print(f"Error storing quotes for {ticker}: {e}")
+
+        if indicator_data:
+            try: await indicators.store_indicators(db, indicator_data) # Use passed db
+            except Exception as e: print(f"Error storing indicators for {ticker}: {e}")
+
+        if not store_latest_only:
+            if daily_bar_data:
+                try: await bars_daily.store_bars(db, daily_bar_data, "historical") # Use passed db
+                except Exception as e: print(f"Error storing daily bars for {ticker}: {e}")
+
+            if news_data:
+                try: await news.store_news(db, news_data) # Use passed db
+                except Exception as e: print(f"Error storing news for {ticker}: {e}")
+
+        print(f"Finished storage for {ticker} in {time.time() - storage_start_time:.2f}s")
+        print(f"Finished processing {ticker} in {time.time() - ticker_start_time:.2f}s") # Renamed log variable
+
     except Exception as e:
         print(f"Error processing {ticker}: {str(e)}")
-        # Don't raise to continue with other tickers 
+        import traceback
+        print(traceback.format_exc()) # Print traceback for errors within process_ticker 
