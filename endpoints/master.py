@@ -228,14 +228,19 @@ async def create_normalized_table(db: ClickHouseDB) -> None:
         print(f"Error creating normalized table: {str(e)}")
         raise e
 
-async def populate_master_table(db: ClickHouseDB) -> None:
+async def populate_master_table(db: ClickHouseDB, from_date: datetime = None, to_date: datetime = None) -> None:
     """
     Populate the master table with existing data from source tables
+    
+    Args:
+        db: Database connection
+        from_date: Optional start date (not used for auto-detection)
+        to_date: Optional end date (not used for auto-detection)
     """
     try:
         print("Populating master table with existing data...")
         
-        # Get the date range we need to process
+        # Always use auto-detection to find all available data
         date_range_query = f"""
         SELECT 
             min(toDate(timestamp)) as min_date,
@@ -245,6 +250,8 @@ async def populate_master_table(db: ClickHouseDB) -> None:
         result = db.client.query(date_range_query)
         min_date = result.first_row[0]
         max_date = result.first_row[1]
+        print(f"Auto-detected date range from stock_bars: {min_date} to {max_date}")
+        
         current_date = min_date
         
         print(f"Processing data from {min_date} to {max_date}")
@@ -448,9 +455,14 @@ async def populate_master_table(db: ClickHouseDB) -> None:
         print(f"Error populating master table: {str(e)}")
         raise e
 
-async def create_master_table(db: ClickHouseDB) -> None:
+async def create_master_table(db: ClickHouseDB, from_date: datetime = None, to_date: datetime = None) -> None:
     """
     Create the master stock data table that combines all other tables
+    
+    Args:
+        db: Database connection
+        from_date: Optional start date for populating data
+        to_date: Optional end date for populating data
     """
     try:
         # Create the master table with timestamp ordering
@@ -473,15 +485,20 @@ async def create_master_table(db: ClickHouseDB) -> None:
                 raise Exception(f"Source table {table} does not exist. Please create source tables first.")
         
         # After creating the table structure, populate it with data
-        await populate_master_table(db)
+        await populate_master_table(db, from_date, to_date)
         
     except Exception as e:
         print(f"Error creating master table: {str(e)}")
         raise e
 
-async def init_master_table(db: ClickHouseDB) -> None:
+async def init_master_table(db: ClickHouseDB, from_date: datetime = None, to_date: datetime = None) -> None:
     """
     Initialize the master stock data table
+    
+    Args:
+        db: Database connection
+        from_date: Optional start date for populating data
+        to_date: Optional end date for populating data
     """
     try:
         start_time = datetime.now()
@@ -495,7 +512,7 @@ async def init_master_table(db: ClickHouseDB) -> None:
         # Create master table
         print("\nCreating master table...")
         master_start = datetime.now()
-        await create_master_table(db)
+        await create_master_table(db, from_date, to_date)
         master_time = datetime.now() - master_start
         print(f"Master table created successfully (took {master_time})")
         

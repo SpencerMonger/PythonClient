@@ -27,39 +27,42 @@ async def fetch_bars(ticker: str, from_date: datetime, to_date: datetime) -> Lis
     Uses precise nanosecond timestamps for timezone-aware inputs (expected UTC).
     """
     bars_list = []
-
+    
     try:
+        # Determine if we're in live mode (short time range)
+        is_live_mode = (to_date - from_date).total_seconds() < 120
+        
         # Use a ticker-specific session
         session = await get_aiohttp_session(ticker)
-        # Set a shorter timeout for the specific request
-        timeout = aiohttp.ClientTimeout(total=5)
-
-        # Construct URL and params based on whether dates are timezone-aware
-        # Polygon Aggs v2 uses timestamp query params: timestamp.gte/gt/lte/lt
-        # It supports nanoseconds epoch or YYYY-MM-DDTHH:MM:SSZ format
-        base_url = f"{config.POLYGON_API_URL}/v2/aggs/ticker/{ticker}/range/1/{config.TIMESPAN}"
-        params = {"limit": 50000, "sort": "asc"} # Sort ascending to get chronological order
-
-        if from_date.tzinfo is not None and to_date.tzinfo is not None:
-            # Use nanosecond timestamps for precise range (expected UTC)
-            # Polygon uses [gte, lte] inclusive range based on testing Aggs v2
-            # Let's use gte and lt for consistency with trades/quotes v3
-            from_ns = int(from_date.timestamp() * 1_000_000_000)
-            to_ns = int(to_date.timestamp() * 1_000_000_000)
-            params["timestamp.gte"] = from_ns
-            params["timestamp.lt"] = to_ns
-            # Construct final URL with range path placeholders not needed when using timestamp params
-            url = f"{config.POLYGON_API_URL}/v2/aggs/ticker/{ticker}/range/1/{config.TIMESPAN}/{from_date.strftime('%Y-%m-%d')}/{to_date.strftime('%Y-%m-%d')}"
-            # ^^^ Let's correct this URL construction. Range path is not needed with timestamp params.
-            url = f"{config.POLYGON_API_URL}/v2/aggs/ticker/{ticker}/range/1/{config.TIMESPAN}/{from_date.strftime('%Y-%m-%d')}/{to_date.strftime('%Y-%m-%d')}"
-            # No, the range path *is* needed. Let's re-read Polygon docs.
-            # Docs V2 Aggregates: /v2/aggs/ticker/{stocksTicker}/range/{multiplier}/{timespan}/{from}/{to}
-            # It seems {from} and {to} are mandatory path params.
-            # Let's use the original date strings for the path, but add the precise timestamp filters
+        
+        # Set timeout based on mode - much longer for historical
+        timeout = aiohttp.ClientTimeout(total=5 if is_live_mode else 60)
+        
+        # Default params
+        params = {
+            "adjusted": "true",
+            "sort": "asc"
+        }
+        
+        # For precise time-specific calls in live mode:
+        if is_live_mode and from_date.tzinfo is not None and to_date.tzinfo is not None:
+            # Calculate precise timestamps - add 1 ns to end for inclusive range
+            from_timestamp_ns = int(from_date.timestamp() * 1e9)
+            to_timestamp_ns = int(to_date.timestamp() * 1e9) + 1
+            
+            # Format in ISO format
+            params["timestamp.gte"] = str(from_timestamp_ns)
+            params["timestamp.lt"] = str(to_timestamp_ns)
+            
+            # Add precision parameters
+            params["precision"] = 1  # Nanosecond precision
+            params["limit"] = 50000 # Ensure high limit for live mode too
+            
+            # Use the v2 aggregates endpoint with precise ISO timestamps
             from_str_path = from_date.strftime("%Y-%m-%d")
             to_str_path = to_date.strftime("%Y-%m-%d")
             url = f"{config.POLYGON_API_URL}/v2/aggs/ticker/{ticker}/range/1/{config.TIMESPAN}/{from_str_path}/{to_str_path}"
-            print(f"Fetching bars for {ticker} using URL: {url} and precise UTC params: {params}") # Debug print
+            print(f"Fetching bars for {ticker} using URL: {url} and precise UTC params: {params}")
 
         else:
             # Fallback for naive dates (historical mode - less precise)
@@ -67,9 +70,10 @@ async def fetch_bars(ticker: str, from_date: datetime, to_date: datetime) -> Lis
             to_str = to_date.strftime("%Y-%m-%d")
             url = f"{config.POLYGON_API_URL}/v2/aggs/ticker/{ticker}/range/1/{config.TIMESPAN}/{from_str}/{to_str}"
             params["limit"] = 50000 # Ensure limit is set for historical too
-            print(f"Fetching bars for {ticker} using URL: {url} and params: {params}") # Debug print
+            print(f"Fetching bars for {ticker} using URL: {url} and params: {params}")
 
-
+        print(f"Using timeout: {timeout.total} seconds (live mode: {is_live_mode})")
+        
         async with session.get(url, params=params, timeout=timeout) as response:
             if response.status != 200:
                 print(f"Error fetching bars for {ticker}: HTTP {response.status} - URL: {response.url}")

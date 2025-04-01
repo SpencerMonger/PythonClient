@@ -1,5 +1,5 @@
 from endpoints.main import main
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import asyncio
 import time
 from typing import Literal
@@ -20,42 +20,65 @@ async def run_data_collection(mode: str = "historical", store_latest_only: bool 
     Args:
         mode: Either "historical" or "live"
         store_latest_only: Whether to only store the latest row per ticker
-        from_date: Optional start date (used in live mode)
-        to_date: Optional end date (used in live mode)
+        from_date: Optional start date (expects UTC in live mode if provided)
+        to_date: Optional end date (expects UTC in live mode if provided)
     """
     start_time = time.time()
+    
+    log_from_date = from_date
+    log_to_date = to_date
     
     if mode == "historical":
         print(f"\nStarting {mode} data processing at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         # For historical mode, use provided dates or defaults
-        if from_date is None or to_date is None:
-            to_date = datetime.now()
-            from_date = to_date - timedelta(days=2)  # 2 days of historical data
-        print(f"Processing {len(tickers)} tickers concurrently for date range {from_date.strftime('%Y-%m-%d')} to {to_date.strftime('%Y-%m-%d')}")
-    else:
-        # For live mode, use Eastern Time
-        et_tz = pytz.timezone('US/Eastern')
-        now = datetime.now(et_tz)
-        print(f"\nStarting {mode} data processing at {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-        
-        # For live mode, use provided dates or default to current minute
-        if from_date is None or to_date is None:
-            # Calculate the most recently completed minute
-            current_minute = now.replace(second=0, microsecond=0)
-            from_date = current_minute - timedelta(minutes=1)  # Start one minute before current
-            to_date = current_minute  # End at the current minute
-            
-        print(f"Processing {len(tickers)} tickers concurrently for {from_date.strftime('%H:%M:00')} - {to_date.strftime('%H:%M:00')} ET")
+        if log_from_date is None or log_to_date is None:
+            log_to_date = datetime.now()
+            log_from_date = log_to_date - timedelta(days=2)  # 2 days of historical data
+        print(f"Processing {len(tickers)} tickers concurrently for date range {log_from_date.strftime('%Y-%m-%d')} to {log_to_date.strftime('%Y-%m-%d')}")
+    elif mode == "live":
+        # Live mode expects UTC dates to be passed in
+        if log_from_date is None or log_to_date is None:
+            # Fallback if not called from live_data.py (e.g., direct run)
+            print("Warning: Live mode called without specific UTC time range, using fallback (last minute ET).")
+            et_tz = pytz.timezone('US/Eastern')
+            now_et = datetime.now(et_tz)
+            current_minute_et = now_et.replace(second=0, microsecond=0)
+            log_from_date = current_minute_et - timedelta(minutes=1)
+            log_to_date = current_minute_et
+            print(f"\nStarting {mode} data processing at {now_et.strftime('%Y-%m-%d %H:%M:%S %Z')} (Fallback ET)")
+            print(f"Processing {len(tickers)} tickers concurrently for fallback ET range: {log_from_date.strftime('%H:%M:%S')} - {log_to_date.strftime('%H:%M:%S')}")
+        else:
+            # Use the provided UTC dates
+            now_utc = datetime.now(timezone.utc)
+            print(f"\nStarting {mode} data processing at {now_utc.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+            print(f"Processing {len(tickers)} tickers concurrently for UTC range: {log_from_date.strftime('%Y-%m-%d %H:%M:%S')} - {log_to_date.strftime('%Y-%m-%d %H:%M:%S')}")
+            # Log ET equivalent for reference
+            et_tz = pytz.timezone('US/Eastern')
+            log_from_et = log_from_date.astimezone(et_tz)
+            log_to_et = log_to_date.astimezone(et_tz)
+            print(f"Equivalent ET range: {log_from_et.strftime('%Y-%m-%d %H:%M:%S %Z')} - {log_to_et.strftime('%Y-%m-%d %H:%M:%S %Z')}")
     
+    # Use the potentially updated log_from_date and log_to_date for processing
+    # These are the actual dates that will be passed to main()
+    actual_from_date = log_from_date
+    actual_to_date = log_to_date
+
     try:
         # In live mode, we need to be even more aggressive with timeouts
         # Set a stricter timeout for data collection
-        timeout = 5.0 if mode == "live" else 600.0
+        # Calculate how much time we need based on date range and mode
+        # Use a slightly longer base timeout for live mode to accommodate DB operations in main()
+        # Use max() to ensure historical has enough time even for short ranges
+        days_in_range = (actual_to_date - actual_from_date).days + 1 if actual_to_date and actual_from_date else 1
+        timeout = 10.0 if mode == "live" else max(600.0, days_in_range * 120.0)  # Increased live timeout slightly
+
+        print(f"Setting overall collection timeout to {timeout:.1f} seconds")
         
         try:
             # Run main data collection with concurrent ticker processing and a timeout
+            # Pass the actual dates determined above
             await asyncio.wait_for(
-                main(tickers, from_date, to_date, store_latest_only),
+                main(tickers, actual_from_date, actual_to_date, store_latest_only),
                 timeout=timeout
             )
             

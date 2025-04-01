@@ -49,7 +49,8 @@ async def init_master_only(db: ClickHouseDB, from_date: datetime = None, to_date
             await master_v2.insert_latest_data(db, from_date, to_date)
         else:
             # For historical mode, do full initialization with master.py
-            print("Historical mode: Using master.py for full table initialization")
+            # In historical mode, we auto-detect the date range from stock_bars table
+            print(f"Historical mode: Using master.py for full table initialization (auto-detecting dates)")
             await master.init_master_table(db)
         print(f"Master table initialized successfully in {time.time() - start_time:.2f} seconds")
     except Exception as e:
@@ -80,16 +81,57 @@ async def main(tickers: List[str], from_date: datetime, to_date: datetime, store
         print(f"\nProcessing {len(tickers)} tickers with max concurrency {MAX_CONCURRENT_TICKERS}...")
         print(f"UTC Time range: {from_date.strftime('%Y-%m-%d %H:%M:%S %Z')} to {to_date.strftime('%Y-%m-%d %H:%M:%S %Z')}")
         
-        semaphore = asyncio.Semaphore(MAX_CONCURRENT_TICKERS)
-        start_time = time.time()
-        tasks = [
-            # Create tasks using the semaphore wrapper
-            process_ticker_with_semaphore(semaphore, ticker, from_date, to_date, store_latest_only)
-            for ticker in tickers
-        ]
-        # Gather the semaphore-wrapped tasks
-        await asyncio.gather(*tasks)
-        print(f"All tickers processed (with semaphore) in {time.time() - start_time:.2f} seconds")
+        # For historical mode (not store_latest_only), split large date ranges into chunks
+        # to avoid overwhelming the API server
+        if not store_latest_only:
+            MAX_DAYS_PER_FETCH = 4  # Maximum days to fetch in one request for historical mode
+            days_total = (to_date - from_date).days + 1
+            
+            if days_total > MAX_DAYS_PER_FETCH:
+                print(f"Historical mode with {days_total} days detected. Processing in chunks of {MAX_DAYS_PER_FETCH} days.")
+                
+                # Process in chunks
+                current_from = from_date
+                while current_from < to_date:
+                    # Calculate chunk end date (not exceeding the overall to_date)
+                    current_to = min(current_from + timedelta(days=MAX_DAYS_PER_FETCH-1), to_date)
+                    
+                    print(f"\nProcessing chunk: {current_from.strftime('%Y-%m-%d')} to {current_to.strftime('%Y-%m-%d')}")
+                    
+                    # Process this chunk
+                    semaphore = asyncio.Semaphore(MAX_CONCURRENT_TICKERS)
+                    start_time = time.time()
+                    tasks = [
+                        process_ticker_with_semaphore(semaphore, ticker, current_from, current_to, store_latest_only)
+                        for ticker in tickers
+                    ]
+                    await asyncio.gather(*tasks)
+                    print(f"Chunk processed in {time.time() - start_time:.2f} seconds")
+                    
+                    # Move to next chunk
+                    current_from = current_to + timedelta(days=1)
+                
+                print(f"All chunks processed successfully")
+            else:
+                # Process the entire date range at once
+                semaphore = asyncio.Semaphore(MAX_CONCURRENT_TICKERS)
+                start_time = time.time()
+                tasks = [
+                    process_ticker_with_semaphore(semaphore, ticker, from_date, to_date, store_latest_only)
+                    for ticker in tickers
+                ]
+                await asyncio.gather(*tasks)
+                print(f"All tickers processed (with semaphore) in {time.time() - start_time:.2f} seconds")
+        else:
+            # For live mode, process the entire range at once
+            semaphore = asyncio.Semaphore(MAX_CONCURRENT_TICKERS)
+            start_time = time.time()
+            tasks = [
+                process_ticker_with_semaphore(semaphore, ticker, from_date, to_date, store_latest_only)
+                for ticker in tickers
+            ]
+            await asyncio.gather(*tasks)
+            print(f"All tickers processed (with semaphore) in {time.time() - start_time:.2f} seconds")
             
         # Update or initialize master table using the local db connection
         if store_latest_only:

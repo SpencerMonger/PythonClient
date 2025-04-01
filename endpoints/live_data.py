@@ -115,14 +115,6 @@ async def run_live_data() -> None:
                 print(f"\nWaiting {wait_time:.2f} seconds until {target_time_et.strftime('%Y-%m-%d %H:%M:%S %Z')} ({target_time_utc.strftime('%Y-%m-%d %H:%M:%S %Z')})...")
                 await asyncio.sleep(wait_time)
                 
-                # Check if market is open *after* waiting, using ET time
-                if not is_market_open():
-                    now_et = datetime.now(et_tz)
-                    print(f"\nMarket is closed at {now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-                    # Wait for 1 minute before checking again
-                    await asyncio.sleep(60)
-                    continue
-                
                 # After waiting, calculate the previous minute's time range in UTC
                 now_utc = datetime.now(timezone.utc)
                 # Use floor division for robustness around minute boundary

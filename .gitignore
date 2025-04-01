@@ -93,6 +93,7 @@ examples/
 polygon/
 test_rest/
 test_websocket/
+endpoints_commit/
 
 # Model files
 saved_models/
