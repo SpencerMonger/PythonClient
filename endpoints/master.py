@@ -168,7 +168,7 @@ async def create_normalized_table(db: ClickHouseDB) -> None:
                    Use simpler approach that doesn't require aggregation functions */
                 modulo(
                     cityHash64(trade_conditions),
-                    10000
+                    1000000
                 ) as trade_conditions,
                 ask_exchange,
                 bid_exchange,

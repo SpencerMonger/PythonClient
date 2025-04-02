@@ -135,7 +135,7 @@ class ModelPredictor:
                             try:
                                 # Use Python's hash function modulo 10000 to approximate cityHash64
                                 # This creates a numeric hash value from the string
-                                return hash(x) % 10000
+                                return hash(x) % 1000000
                             except Exception as e:
                                 print(f"Warning: Error hashing trade_conditions: {str(e)}")
                                 return 0
@@ -161,12 +161,12 @@ class ModelPredictor:
                 
             # Cap extremely large values with column-specific limits
             if col == 'trade_conditions':
-                # For trade_conditions, we know the value should be limited to the range [0, 10000]
-                # since it's created with modulo 10000 in the SQL
-                max_val = 10000  # The maximum possible hash value 
+                # For trade_conditions, we know the value should be limited to the range [0, 1000000]
+                # since it's created with modulo 1000000 in the SQL
+                max_val = 1000000  # The maximum possible hash value 
                 min_val = 0      # The minimum possible hash value
                 if (X[col] > max_val).any() or (X[col] < min_val).any():
-                    print(f"Warning: Trade conditions contains values outside expected range [0, 10000], capping")
+                    print(f"Warning: Trade conditions contains values outside expected range [0, 1000000], capping")
                     X[col] = X[col].clip(min_val, max_val)
             else:
                 # For other columns, use general limits
