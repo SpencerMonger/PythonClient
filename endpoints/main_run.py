@@ -64,39 +64,25 @@ async def run_data_collection(mode: str = "historical", store_latest_only: bool 
     actual_to_date = log_to_date
 
     try:
-        # In live mode, we need to be even more aggressive with timeouts
-        # Set a stricter timeout for data collection
-        # Calculate how much time we need based on date range and mode
-        # Use a slightly longer base timeout for live mode to accommodate DB operations in main()
-        # Use max() to ensure historical has enough time even for short ranges
-        days_in_range = (actual_to_date - actual_from_date).days + 1 if actual_to_date and actual_from_date else 1
-        timeout = 10.0 if mode == "live" else max(600.0, days_in_range * 120.0)  # Increased live timeout slightly
-
-        print(f"Setting overall collection timeout to {timeout:.1f} seconds")
+        # Removed the outer timeout calculation and asyncio.wait_for wrapper
+        # Timeout and retries are handled within main() now
+        # days_in_range = (actual_to_date - actual_from_date).days + 1 if actual_to_date and actual_from_date else 1
+        # timeout = 10.0 if mode == "live" else max(600.0, days_in_range * 120.0)
+        # print(f"Setting overall collection timeout to {timeout:.1f} seconds")
         
-        try:
-            # Run main data collection with concurrent ticker processing and a timeout
-            # Pass the actual dates determined above
-            await asyncio.wait_for(
-                main(tickers, actual_from_date, actual_to_date, store_latest_only),
-                timeout=timeout
-            )
-            
-            elapsed = time.time() - start_time
-            print(f"Data collection completed in {elapsed:.2f} seconds")
-        except asyncio.TimeoutError:
-            elapsed = time.time() - start_time
-            print(f"Data collection timed out after {elapsed:.2f} seconds - continuing with available data")
-        except Exception as e:
-            elapsed = time.time() - start_time
-            print(f"Error in data collection: {str(e)} (after {elapsed:.2f} seconds)")
-            # Don't re-raise to allow continued execution with partial data
-    
-    # Final catch-all to ensure we don't crash the main loop
+        # Directly call main without the outer wait_for
+        await main(tickers, actual_from_date, actual_to_date, store_latest_only)
+        
+        elapsed = time.time() - start_time
+        print(f"Data collection completed successfully in {elapsed:.2f} seconds")
+
+    # Adjusted exception handling as outer timeout is removed
     except Exception as e:
         elapsed = time.time() - start_time
-        print(f"Unexpected error in run_data_collection: {str(e)} (after {elapsed:.2f} seconds)")
-        # Continue execution despite errors
+        print(f"Error during data collection: {str(e)} (after {elapsed:.2f} seconds)")
+        import traceback
+        print(traceback.format_exc())
+        # Consider if we need to differentiate between errors from main() vs other setup steps
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Run data collection in historical or live mode')

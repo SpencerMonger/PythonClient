@@ -110,14 +110,17 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
         results_dict = dict(zip(task_keys, results))
 
         # --- Handle Trades and Quotes Fetching (Historical Mode Only) ---
-        trade_data = []
-        quote_data = []
+        # trade_data and quote_data are no longer accumulated for the whole chunk
+        # trade_data = [] # Removed
+        # quote_data = [] # Removed
 
         if not is_live_mode: # Only run this complex fetching for historical mode
-            print(f"Fetching trades and quotes day by day for {ticker} (historical mode)...")
+            print(f"Fetching and storing trades and quotes day by day for {ticker} (historical mode)...")
             days = (fetch_to_utc - fetch_from_utc).days + 1
             api_semaphore = asyncio.Semaphore(2) # Limit concurrent API calls
             max_retries = 3
+            total_trades_stored = 0
+            total_quotes_stored = 0
 
             async def fetch_with_retry(fetch_fn, day_start, day_end, data_type="trades"):
                 retries = 0
@@ -146,7 +149,15 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
                         print(f"ERROR ({type(e).__name__})")
                         retries += 1
                         # Handle potential 502 Bad Gateway with longer backoff
-                        if isinstance(e, aiohttp.ClientResponseError) and e.status == 502:
+                        # Need to import aiohttp for this check - assuming it's available in the environment
+                        # If not, this specific check might need removal or adjustment
+                        try:
+                            import aiohttp
+                            is_aiohttp_error = isinstance(e, aiohttp.ClientResponseError)
+                        except ImportError:
+                            is_aiohttp_error = False # Cannot check if aiohttp is not installed
+
+                        if is_aiohttp_error and e.status == 502:
                             backoff = min(30, backoff * 2) # Longer backoff for 502
                             print(f"Received 502 Bad Gateway, longer backoff {backoff:.1f}s")
                         else:
@@ -155,27 +166,53 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
                         else: print(f"Failed final retry for {data_type} on {day_start.strftime('%Y-%m-%d')}: {type(e).__name__}")
                 return []
 
-            day_tasks = []
+            # Process day by day: fetch, then store immediately
             for day_offset in range(days):
                 day_start = (fetch_from_utc + timedelta(days=day_offset)).replace(hour=0, minute=0, second=0, microsecond=0)
                 day_end = day_start + timedelta(days=1)
+
                 # Skip weekends
-                if day_start.weekday() >= 5: continue
+                if day_start.weekday() >= 5:
+                    print(f"Skipping weekend: {day_start.strftime('%Y-%m-%d')}")
+                    continue
 
-                trade_task = asyncio.create_task(fetch_with_retry(trades.fetch_trades, day_start, day_end, "trades"))
-                quote_task = asyncio.create_task(fetch_with_retry(quotes.fetch_quotes, day_start, day_end, "quotes"))
-                day_tasks.append((trade_task, quote_task))
+                print(f"Processing historical data for {ticker} on {day_start.strftime('%Y-%m-%d')}")
 
-            # Process tasks, allowing some concurrency controlled by semaphore in fetch_with_retry
-            all_trade_tasks = [t[0] for t in day_tasks]
-            all_quote_tasks = [t[1] for t in day_tasks]
+                # Fetch trades and quotes for the current day
+                daily_trade_data = await fetch_with_retry(trades.fetch_trades, day_start, day_end, "trades")
+                daily_quote_data = await fetch_with_retry(quotes.fetch_quotes, day_start, day_end, "quotes")
 
-            trade_results_daily = await asyncio.gather(*all_trade_tasks)
-            quote_results_daily = await asyncio.gather(*all_quote_tasks)
+                # Store trades for the current day immediately
+                if daily_trade_data:
+                    try:
+                        await trades.store_trades(db, daily_trade_data)
+                        total_trades_stored += len(daily_trade_data)
+                        print(f"Stored {len(daily_trade_data)} trades for {day_start.strftime('%Y-%m-%d')}")
+                    except Exception as e:
+                        print(f"Error storing trades for {ticker} on {day_start.strftime('%Y-%m-%d')}: {e}")
+                else:
+                     print(f"No trades to store for {day_start.strftime('%Y-%m-%d')}")
 
-            trade_data = [item for sublist in trade_results_daily if sublist for item in sublist]
-            quote_data = [item for sublist in quote_results_daily if sublist for item in sublist]
-            print(f"Finished historical fetching for {ticker}: Got {len(trade_data)} trades, {len(quote_data)} quotes total.")
+
+                # Store quotes for the current day immediately
+                if daily_quote_data:
+                    try:
+                        await quotes.store_quotes(db, daily_quote_data)
+                        total_quotes_stored += len(daily_quote_data)
+                        print(f"Stored {len(daily_quote_data)} quotes for {day_start.strftime('%Y-%m-%d')}")
+                    except Exception as e:
+                        print(f"Error storing quotes for {ticker} on {day_start.strftime('%Y-%m-%d')}: {e}")
+                else:
+                     print(f"No quotes to store for {day_start.strftime('%Y-%m-%d')}")
+
+
+            print(f"Finished historical fetch/store for {ticker}: Stored {total_trades_stored} trades, {total_quotes_stored} quotes total.")
+            # --- The section below gathering daily results is removed ---
+            # day_tasks = [] ...
+            # ...
+            # trade_data = [item for sublist in trade_results_daily if sublist for item in sublist]
+            # quote_data = [item for sublist in quote_results_daily if sublist for item in sublist]
+            # print(f"Finished historical fetching for {ticker}: Got {len(trade_data)} trades, {len(quote_data)} quotes total.")
         else:
             # Live Mode: Use results gathered initially
             trade_data = results_dict.get('trades')
@@ -207,22 +244,27 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
             else:
                 print(f"Successfully stored {len(bar_data)} bars for {ticker}")
 
-        if trade_data:
-            try:
-                await trades.store_trades(db, trade_data)
-            except Exception as e:
-                print(f"Error storing trades for {ticker}: {e}")
-            else:
-                print(f"Successfully stored {len(trade_data)} trades for {ticker}")
+        # --- Trade and Quote Storage is REMOVED from here for historical mode ---
+        # It's now handled within the daily loop above for historical mode.
+        # We only need to store trades/quotes here if it's LIVE mode.
+        if is_live_mode:
+            if trade_data:
+                try:
+                    await trades.store_trades(db, trade_data)
+                except Exception as e:
+                    print(f"Error storing trades for {ticker} (live): {e}")
+                else:
+                    print(f"Successfully stored {len(trade_data)} trades for {ticker} (live)")
 
-        if quote_data:
-            try:
-                await quotes.store_quotes(db, quote_data)
-            except Exception as e:
-                print(f"Error storing quotes for {ticker}: {e}")
-            else:
-                print(f"Successfully stored {len(quote_data)} quotes for {ticker}")
+            if quote_data:
+                try:
+                    await quotes.store_quotes(db, quote_data)
+                except Exception as e:
+                    print(f"Error storing quotes for {ticker} (live): {e}")
+                else:
+                    print(f"Successfully stored {len(quote_data)} quotes for {ticker} (live)")
 
+        # Store indicators (unchanged)
         if indicator_data:
             try:
                 await indicators.store_indicators(db, indicator_data)
@@ -231,23 +273,25 @@ async def process_ticker(db: ClickHouseDB, ticker: str, from_date: datetime, to_
             else:
                 print(f"Successfully stored {len(indicator_data)} indicators for {ticker}")
 
-        # Only store daily bars and news in historical mode
+
+        # Only store daily bars and news in historical mode (unchanged)
         if not is_live_mode:
-            if daily_bar_data:
-                try:
+             if daily_bar_data:
+                 try:
                     await bars_daily.store_bars(db, daily_bar_data, "historical")
-                except Exception as e:
+                 except Exception as e:
                     print(f"Error storing daily bars for {ticker}: {e}")
-                else:
+                 else:
                     print(f"Successfully stored {len(daily_bar_data)} daily bars for {ticker}")
 
-            if news_data:
-                try:
+             if news_data:
+                 try:
                     await news.store_news(db, news_data)
-                except Exception as e:
+                 except Exception as e:
                     print(f"Error storing news for {ticker}: {e}")
-                else:
+                 else:
                     print(f"Successfully stored {len(news_data)} news items for {ticker}")
+
 
         print(f"Finished storage for {ticker} in {time.time() - storage_start_time:.2f}s")
         print(f"Finished processing {ticker} in {time.time() - ticker_start_time:.2f}s") # Renamed log variable

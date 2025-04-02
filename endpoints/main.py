@@ -9,7 +9,7 @@ from endpoints.process_ticker import process_ticker_with_connection
 from endpoints.polygon_client import close_session
 
 # Limit concurrent ticker processing
-MAX_CONCURRENT_TICKERS = 3 # Limit to 3 simultaneous tickers
+MAX_CONCURRENT_TICKERS = 1 # Limit to 1 simultaneous ticker
 
 # Helper function to manage semaphore for ticker processing
 async def process_ticker_with_semaphore(sem, ticker, from_date, to_date, store_latest_only):
@@ -92,36 +92,100 @@ async def main(tickers: List[str], from_date: datetime, to_date: datetime, store
                 
                 # Process in chunks
                 current_from = from_date
+                max_chunk_retries = 3  # Maximum retries per chunk
+                chunk_backoff_base = 300.0  # 5 minutes base backoff between retries
+                
                 while current_from < to_date:
                     # Calculate chunk end date (not exceeding the overall to_date)
                     current_to = min(current_from + timedelta(days=MAX_DAYS_PER_FETCH-1), to_date)
+                    chunk_retries = 0
+                    chunk_success = False
                     
-                    print(f"\nProcessing chunk: {current_from.strftime('%Y-%m-%d')} to {current_to.strftime('%Y-%m-%d')}")
+                    while not chunk_success and chunk_retries < max_chunk_retries:
+                        if chunk_retries > 0:
+                            # Calculate exponential backoff with some randomness
+                            backoff = chunk_backoff_base * (1.5 ** chunk_retries)
+                            print(f"\nRetrying chunk {current_from.strftime('%Y-%m-%d')} to {current_to.strftime('%Y-%m-%d')} "
+                                  f"(attempt {chunk_retries + 1}/{max_chunk_retries}) after {backoff:.1f}s backoff...")
+                            await asyncio.sleep(backoff)
                     
-                    # Process this chunk
-                    semaphore = asyncio.Semaphore(MAX_CONCURRENT_TICKERS)
-                    start_time = time.time()
-                    tasks = [
-                        process_ticker_with_semaphore(semaphore, ticker, current_from, current_to, store_latest_only)
-                        for ticker in tickers
-                    ]
-                    await asyncio.gather(*tasks)
-                    print(f"Chunk processed in {time.time() - start_time:.2f} seconds")
+                        print(f"\nProcessing chunk: {current_from.strftime('%Y-%m-%d')} to {current_to.strftime('%Y-%m-%d')}")
+                        
+                        # Process this chunk
+                        semaphore = asyncio.Semaphore(MAX_CONCURRENT_TICKERS)
+                        start_time = time.time()
+                        
+                        # Calculate timeout based on chunk size and number of tickers
+                        # More generous timeout since we're processing one ticker at a time
+                        chunk_days = (current_to - current_from).days + 1
+                        timeout_per_day = 1200.0  # 20 minutes per day
+                        chunk_timeout = max(3600.0, chunk_days * timeout_per_day)  # At least 1 hour, scales with days
+                        
+                        try:
+                            tasks = [
+                                process_ticker_with_semaphore(semaphore, ticker, current_from, current_to, store_latest_only)
+                                for ticker in tickers
+                            ]
+                            await asyncio.wait_for(asyncio.gather(*tasks), timeout=chunk_timeout)
+                            print(f"Chunk processed successfully in {time.time() - start_time:.2f} seconds")
+                            chunk_success = True  # Mark as successful to move to next chunk
+                            
+                        except asyncio.TimeoutError:
+                            chunk_retries += 1
+                            if chunk_retries >= max_chunk_retries:
+                                print(f"ERROR: Chunk processing failed after {max_chunk_retries} attempts - data for "
+                                      f"{current_from.strftime('%Y-%m-%d')} to {current_to.strftime('%Y-%m-%d')} may be incomplete!")
+                            else:
+                                print(f"Chunk processing timed out after {chunk_timeout:.2f} seconds - will retry "
+                                      f"({chunk_retries}/{max_chunk_retries} attempts made)")
+                        except Exception as e:
+                            chunk_retries += 1
+                            print(f"Error processing chunk: {str(e)}")
+                            if chunk_retries >= max_chunk_retries:
+                                print(f"ERROR: Chunk processing failed after {max_chunk_retries} attempts due to errors - data for "
+                                      f"{current_from.strftime('%Y-%m-%d')} to {current_to.strftime('%Y-%m-%d')} may be incomplete!")
+                            
+                    # Only move to next chunk if we succeeded or exhausted retries
+                    if chunk_success or chunk_retries >= max_chunk_retries:
+                        current_from = current_to + timedelta(days=1)
                     
-                    # Move to next chunk
-                    current_from = current_to + timedelta(days=1)
-                
-                print(f"All chunks processed successfully")
+                print(f"All chunks processed - check logs for any chunks that may have failed after retries")
             else:
                 # Process the entire date range at once
                 semaphore = asyncio.Semaphore(MAX_CONCURRENT_TICKERS)
                 start_time = time.time()
-                tasks = [
-                    process_ticker_with_semaphore(semaphore, ticker, from_date, to_date, store_latest_only)
-                    for ticker in tickers
-                ]
-                await asyncio.gather(*tasks)
-                print(f"All tickers processed (with semaphore) in {time.time() - start_time:.2f} seconds")
+                
+                # Calculate timeout for the entire range
+                timeout = max(3600.0, days_total * 1200.0)  # At least 1 hour, 20 minutes per day
+                max_retries = 3
+                retry_count = 0
+                success = False
+                
+                while not success and retry_count < max_retries:
+                    if retry_count > 0:
+                        backoff = 300.0 * (1.5 ** retry_count)  # 5 minutes base backoff
+                        print(f"\nRetrying full range (attempt {retry_count + 1}/{max_retries}) after {backoff:.1f}s backoff...")
+                        await asyncio.sleep(backoff)
+                        
+                    try:
+                        tasks = [
+                            process_ticker_with_semaphore(semaphore, ticker, from_date, to_date, store_latest_only)
+                            for ticker in tickers
+                        ]
+                        await asyncio.wait_for(asyncio.gather(*tasks), timeout=timeout)
+                        print(f"All tickers processed successfully in {time.time() - start_time:.2f} seconds")
+                        success = True
+                    except asyncio.TimeoutError:
+                        retry_count += 1
+                        if retry_count >= max_retries:
+                            print(f"ERROR: Processing failed after {max_retries} attempts - data may be incomplete!")
+                        else:
+                            print(f"Processing timed out after {timeout:.2f} seconds - will retry ({retry_count}/{max_retries} attempts made)")
+                    except Exception as e:
+                        retry_count += 1
+                        print(f"Error processing data: {str(e)}")
+                        if retry_count >= max_retries:
+                            print(f"ERROR: Processing failed after {max_retries} attempts due to errors - data may be incomplete!")
         else:
             # For live mode, process the entire range at once
             semaphore = asyncio.Semaphore(MAX_CONCURRENT_TICKERS)
@@ -155,6 +219,12 @@ async def main(tickers: List[str], from_date: datetime, to_date: datetime, store
     finally:
         print("\nClosing main database connection...")
         db.close() # Close the main DB connection
+        
+        # Ensure polygon client session is closed
+        try:
+            await close_session()
+        except Exception as e:
+            print(f"Warning: Error closing polygon client session: {str(e)}")
 
 if __name__ == "__main__":
     # Example usage for creating just the master table
