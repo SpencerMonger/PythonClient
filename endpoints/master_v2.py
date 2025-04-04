@@ -87,7 +87,7 @@ NORMALIZED_SCHEMA = {
     "ticker": "String",
     "timestamp": "DateTime64(9)",
     "target": "Nullable(Int32)",
-    "quote_conditions": "String",
+    "quote_conditions": "Float64",  # Changed from String to Float64
     "trade_conditions": "Float64",  # Changed from String to Float64 for model compatibility
     "ask_exchange": "Nullable(Int32)",
     "bid_exchange": "Nullable(Int32)",
@@ -437,7 +437,7 @@ async def create_normalized_table(db: ClickHouseDB) -> None:
             ticker String,
             timestamp DateTime64(9),
             target Nullable(Int32),
-            quote_conditions String,
+            quote_conditions Float64,
             trade_conditions Float64,
             ask_exchange Nullable(Int32),
             bid_exchange Nullable(Int32),
@@ -598,8 +598,8 @@ async def create_normalized_table(db: ClickHouseDB) -> None:
             ticker,
             timestamp,
             target,
-            quote_conditions,
-            trade_conditions,
+            modulo(cityHash64(coalesce(quote_conditions, '')), 1000000) as quote_conditions,
+            modulo(cityHash64(coalesce(trade_conditions, '')), 1000000) as trade_conditions,
             ask_exchange,
             bid_exchange,
             trade_exchange,
@@ -780,8 +780,8 @@ async def update_normalized_table(db: ClickHouseDB, from_date: datetime, to_date
             ticker,
             timestamp,
             target,
-            quote_conditions,
-            trade_conditions,
+            modulo(cityHash64(coalesce(quote_conditions, '')), 1000000) as quote_conditions,
+            modulo(cityHash64(coalesce(trade_conditions, '')), 1000000) as trade_conditions,
             ask_exchange,
             bid_exchange,
             trade_exchange,
@@ -970,8 +970,8 @@ async def reinit_current_day(db: ClickHouseDB) -> None:
                 ticker,
                 timestamp,
                 target,
-                quote_conditions,
-                trade_conditions,
+                modulo(cityHash64(coalesce(quote_conditions, '')), 1000000) as quote_conditions,
+                modulo(cityHash64(coalesce(trade_conditions, '')), 1000000) as trade_conditions,
                 ask_exchange,
                 bid_exchange,
                 trade_exchange,
@@ -1205,7 +1205,10 @@ async def insert_latest_data(db: ClickHouseDB, from_date: datetime, to_date: dat
                     WINDOW w AS (PARTITION BY ticker ORDER BY timestamp ROWS BETWEEN 100 PRECEDING AND CURRENT ROW)
                 )
                 SELECT
-                    uni_id, ticker, timestamp, target, quote_conditions, modulo(cityHash64(coalesce(trade_conditions, '')), 1000000) as trade_conditions, ask_exchange, bid_exchange, trade_exchange,
+                    uni_id, ticker, timestamp, target,
+                    modulo(cityHash64(coalesce(quote_conditions, '')), 1000000) as quote_conditions,
+                    modulo(cityHash64(coalesce(trade_conditions, '')), 1000000) as trade_conditions,
+                    ask_exchange, bid_exchange, trade_exchange,
                     round(5 / (1 + exp(-5 * (coalesce(nullIf(open, 0), 2) / 1000))), 2) as open, round(5 / (1 + exp(-5 * (coalesce(nullIf(high, 0), 2) / 1000))), 2) as high, round(5 / (1 + exp(-5 * (coalesce(nullIf(low, 0), 2) / 1000))), 2) as low, round(5 / (1 + exp(-5 * (coalesce(nullIf(close, 0), 2) / 1000))), 2) as close, round(5 / (1 + exp(-5 * (coalesce(nullIf(volume, 0), 2) / 100000))), 2) as volume, round(5 / (1 + exp(-5 * (coalesce(nullIf(vwap, 0), 2) / 1000))), 2) as vwap, round(5 / (1 + exp(-5 * (coalesce(nullIf(transactions, 0), 2) / 1000))), 2) as transactions, round(5 / (1 + exp(-5 * (coalesce(nullIf(price_diff, 0), 2) / 10))), 2) as price_diff, round(5 / (1 + exp(-5 * (coalesce(nullIf(max_price_diff, 0), 2) / 10))), 2) as max_price_diff, round(5 / (1 + exp(-5 * (coalesce(nullIf(avg_bid_price, 0), 2) / 1000))), 2) as avg_bid_price, round(5 / (1 + exp(-5 * (coalesce(nullIf(avg_ask_price, 0), 2) / 1000))), 2) as avg_ask_price, round(5 / (1 + exp(-5 * (coalesce(nullIf(min_bid_price, 0), 2) / 1000))), 2) as min_bid_price, round(5 / (1 + exp(-5 * (coalesce(nullIf(max_ask_price, 0), 2) / 1000))), 2) as max_ask_price, round(5 / (1 + exp(-5 * (coalesce(nullIf(total_bid_size, 0), 2) / 100000))), 2) as total_bid_size, round(5 / (1 + exp(-5 * (coalesce(nullIf(total_ask_size, 0), 2) / 100000))), 2) as total_ask_size, round(5 / (1 + exp(-5 * (coalesce(nullIf(quote_count, 0), 2) / 1000))), 2) as quote_count, round(5 / (1 + exp(-5 * (coalesce(nullIf(avg_trade_price, 0), 2) / 1000))), 2) as avg_trade_price, round(5 / (1 + exp(-5 * (coalesce(nullIf(min_trade_price, 0), 2) / 1000))), 2) as min_trade_price, round(5 / (1 + exp(-5 * (coalesce(nullIf(max_trade_price, 0), 2) / 1000))), 2) as max_trade_price, round(5 / (1 + exp(-5 * (coalesce(nullIf(total_trade_size, 0), 2) / 100000))), 2) as total_trade_size, round(5 / (1 + exp(-5 * (coalesce(nullIf(trade_count, 0), 2) / 1000))), 2) as trade_count, round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_5, 0), 2) / 1000))), 2) as sma_5, round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_9, 0), 2) / 1000))), 2) as sma_9, round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_12, 0), 2) / 1000))), 2) as sma_12, round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_20, 0), 2) / 1000))), 2) as sma_20, round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_50, 0), 2) / 1000))), 2) as sma_50, round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_100, 0), 2) / 1000))), 2) as sma_100, round(5 / (1 + exp(-5 * (coalesce(nullIf(sma_200, 0), 2) / 1000))), 2) as sma_200, round(5 / (1 + exp(-5 * (coalesce(nullIf(ema_9, 0), 2) / 1000))), 2) as ema_9, round(5 / (1 + exp(-5 * (coalesce(nullIf(ema_12, 0), 2) / 1000))), 2) as ema_12, round(5 / (1 + exp(-5 * (coalesce(nullIf(ema_20, 0), 2) / 1000))), 2) as ema_20, round(5 / (1 + exp(-5 * (coalesce(nullIf(macd_value, 0), 2) / 10))), 2) as macd_value, round(5 / (1 + exp(-5 * (coalesce(nullIf(macd_signal, 0), 2) / 10))), 2) as macd_signal, round(5 / (1 + exp(-5 * (coalesce(nullIf(macd_histogram, 0), 2) / 10))), 2) as macd_histogram, round(5 / (1 + exp(-5 * (coalesce(nullIf(rsi_14, 0), 2) / 100))), 2) as rsi_14, round(5 / (1 + exp(-5 * (coalesce(nullIf(daily_high, 0), 2) / 1000))), 2) as daily_high, round(5 / (1 + exp(-5 * (coalesce(nullIf(daily_low, 0), 2) / 1000))), 2) as daily_low, round(5 / (1 + exp(-5 * (coalesce(nullIf(previous_close, 0), 2) / 1000))), 2) as previous_close, round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_current, 0), 2) / 100))), 2) as tr_current, round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_high_close, 0), 2) / 100))), 2) as tr_high_close, round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_low_close, 0), 2) / 100))), 2) as tr_low_close, round(5 / (1 + exp(-5 * (coalesce(nullIf(tr_value, 0), 2) / 100))), 2) as tr_value, round(5 / (1 + exp(-5 * (coalesce(nullIf(atr_value, 0), 2) / 100))), 2) as atr_value
                 FROM stats
                 WHERE toDate(timestamp) = '{today_str_utc}' # Filter for target UTC date
@@ -1323,7 +1326,7 @@ async def init_master_v2(db: ClickHouseDB) -> None:
             ticker String,
             timestamp DateTime64(9),
             target Nullable(Int32),
-            quote_conditions String,
+            quote_conditions Float64,
             trade_conditions Float64,
             ask_exchange Nullable(Int32),
             bid_exchange Nullable(Int32),
@@ -1420,7 +1423,7 @@ async def init_master_v2(db: ClickHouseDB) -> None:
             # Insert marker into normalized table with exact column count
             norm_marker_query = f"""
             INSERT INTO {db.database}.{config.TABLE_STOCK_NORMALIZED} (
-                uni_id, ticker, timestamp, target, 
+                uni_id, ticker, timestamp, target,
                 quote_conditions, trade_conditions,
                 ask_exchange, bid_exchange, trade_exchange,
                 open, high, low, close, volume, vwap, transactions,
@@ -1437,7 +1440,7 @@ async def init_master_v2(db: ClickHouseDB) -> None:
                 'SYSTEM_INIT',
                 now(),
                 0,
-                'SYSTEM_INIT', 'SYSTEM_INIT',
+                0.0, 0.0,  # Hashed quote/trade conditions as Float64
                 0, 0, 0,
                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0

@@ -83,7 +83,7 @@ NORMALIZED_SCHEMA = {
     "ticker": "String",
     "timestamp": "DateTime64(9)",
     "target": "Nullable(Int32)",
-    "quote_conditions": "String",
+    "quote_conditions": "Float64",  # Changed from String
     "trade_conditions": "Float64",  # Changed from String to Float64 for model compatibility
     "ask_exchange": "Nullable(Int32)",
     "bid_exchange": "Nullable(Int32)",
@@ -163,8 +163,12 @@ async def create_normalized_table(db: ClickHouseDB) -> None:
                 ticker,
                 timestamp,
                 target,
-                quote_conditions,
-                /* Hash the trade_conditions for model compatibility 
+                /* Hash the quote_conditions similarly to trade_conditions */
+                modulo(
+                    cityHash64(quote_conditions),
+                    1000000
+                ) as quote_conditions,
+                /* Hash the trade_conditions for model compatibility
                    Use simpler approach that doesn't require aggregation functions */
                 modulo(
                     cityHash64(trade_conditions),

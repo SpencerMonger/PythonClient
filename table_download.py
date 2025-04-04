@@ -146,7 +146,7 @@ async def download_normalized_table(db: ClickHouseDB, output_dir: str, start_dat
             'sma_50', 'sma_100', 'sma_200', 'ema_9', 'ema_12', 'ema_20',
             'macd_value', 'macd_signal', 'macd_histogram', 'rsi_14', 'daily_high',
             'daily_low', 'previous_close', 'tr_current', 'tr_high_close',
-            'tr_low_close', 'tr_value', 'atr_value', 'trade_conditions'
+            'tr_low_close', 'tr_value', 'atr_value', 'trade_conditions', 'quote_conditions'
         ]
         
         for col in expected_numeric_cols:
@@ -156,7 +156,7 @@ async def download_normalized_table(db: ClickHouseDB, output_dir: str, start_dat
                 
             # Check column dtype
             col_dtype = df[col].dtype
-            print(f"  Checking column '{col}' (dtype: {col_dtype})...")
+            # print(f"  Checking column '{col}' (dtype: {col_dtype})...")
             
             # First, identify non-numeric values by type and specific values
             issues = {}
@@ -226,7 +226,11 @@ async def download_normalized_table(db: ClickHouseDB, output_dir: str, start_dat
                 df[col] = col_fixed
                 total_issues_fixed += total_issues
             else:
-                print("    No issues found.")
+                # Only print if no fixing was needed, otherwise the fixing block prints
+                pass # print("    No issues found.")
+            
+            # Print the final dtype *after* potential conversion/fixing
+            print(f"  Processed column '{col}' (final dtype: {df[col].dtype}).")
         
         if total_issues_fixed > 0:
             print(f"\nFixed a total of {total_issues_fixed} problematic values across all columns.")

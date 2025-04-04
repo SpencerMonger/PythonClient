@@ -124,27 +124,8 @@ class ModelPredictor:
         for col in data_clean.columns:
             if col not in ['ticker', 'timestamp']:  # Skip non-numeric columns
                 try:
-                    # Special handling for trade_conditions as a fallback
-                    if col == 'trade_conditions' and isinstance(data_clean[col].iloc[0], str):
-                        print(f"Converting string trade_conditions to hash value...")
-                        
-                        # Hash function to convert string to number (same as in SQL)
-                        def hash_trade_conditions(x):
-                            if not x or x == '':
-                                return 0
-                            try:
-                                # Use Python's hash function modulo 10000 to approximate cityHash64
-                                # This creates a numeric hash value from the string
-                                return hash(x) % 1000000
-                            except Exception as e:
-                                print(f"Warning: Error hashing trade_conditions: {str(e)}")
-                                return 0
-                                
-                        data_clean[col] = data_clean[col].apply(hash_trade_conditions)
-                        print(f"Converted trade_conditions to hash: {data_clean[col].iloc[0]}")
-                    else:
-                        # Standard conversion for other columns
-                        data_clean[col] = pd.to_numeric(data_clean[col], errors='coerce')
+                    # Standard conversion for all numeric columns
+                    data_clean[col] = pd.to_numeric(data_clean[col], errors='coerce')
                 except Exception as e:
                     print(f"Warning: Could not convert column {col}: {str(e)}")
         
@@ -154,27 +135,17 @@ class ModelPredictor:
         # Check for any remaining NaN values and also cap extremely large values
         # that could cause overflow or infinity errors
         for col in X.columns:
-            # Replace NaN values with 0
+            # Replace NaN values with 2.5
             if X[col].isna().any():
-                print(f"Warning: NaN values found in column {col}, replacing with 0")
-                X[col] = X[col].fillna(0)
+                print(f"Warning: NaN values found in column {col}, replacing with 2.5")
+                X[col] = X[col].fillna(2.5)
                 
-            # Cap extremely large values with column-specific limits
-            if col == 'trade_conditions':
-                # For trade_conditions, we know the value should be limited to the range [0, 1000000]
-                # since it's created with modulo 1000000 in the SQL
-                max_val = 1000000  # The maximum possible hash value 
-                min_val = 0      # The minimum possible hash value
-                if (X[col] > max_val).any() or (X[col] < min_val).any():
-                    print(f"Warning: Trade conditions contains values outside expected range [0, 1000000], capping")
-                    X[col] = X[col].clip(min_val, max_val)
-            else:
-                # For other columns, use general limits
-                max_val = 1e6  # Cap at a million
-                min_val = -1e6  # Cap at negative million
-                if (X[col] > max_val).any() or (X[col] < min_val).any():
-                    print(f"Warning: Extreme values found in column {col}, capping to range [{min_val}, {max_val}]")
-                    X[col] = X[col].clip(min_val, max_val)
+            # Use general limits for all columns (removed specific trade_conditions capping)
+            max_val = 1e6  # Cap at a million
+            min_val = -1e6 # Cap at negative million
+            if (X[col] > max_val).any() or (X[col] < min_val).any():
+                print(f"Warning: Extreme values found in column {col}, capping to range [{min_val}, {max_val}]")
+                X[col] = X[col].clip(min_val, max_val)
                 
         # Check for any remaining NaN or infinity values
         if not X.isna().any().any() and np.isfinite(X).all().all():
@@ -183,8 +154,8 @@ class ModelPredictor:
             print("Warning: Data still contains NaN or infinite values after cleaning")
             cols_with_issues = X.columns[(X.isna().any()) | (~np.isfinite(X).all())]
             print(f"Columns with issues: {cols_with_issues}")
-            # More aggressive cleaning - replace all problematic values with zeros
-            X = X.fillna(0).replace([np.inf, -np.inf], 0)
+            # More aggressive cleaning - replace all problematic values with 2.5
+            X = X.fillna(2.5).replace([np.inf, -np.inf], 2.5)
         
         print("Making prediction...")
         try:
