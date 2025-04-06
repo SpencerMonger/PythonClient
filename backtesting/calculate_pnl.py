@@ -1,6 +1,7 @@
 import os
 from datetime import timedelta, datetime
 import pandas as pd
+import argparse
 
 # Assuming db_utils is in the same directory
 from db_utils import ClickHouseClient
@@ -48,11 +49,12 @@ PNL_ORDER_BY = "ORDER BY (ticker, prediction_timestamp)"
 # Batching configuration for inner loop (predictions per ticker)
 PREDICTION_CHUNK_SIZE = 10000
 
-# Buffer added to the min/max quote time range for ASOF JOIN
-QUOTE_TIME_BUFFER = timedelta(hours=1) # Adjust buffer as needed (e.g., timedelta(days=1))
+# Buffer added to the min/max quote time range for the quote filter
+# Increased buffer slightly in case the very first quote needed is just outside the prev buffer
+QUOTE_TIME_BUFFER = timedelta(hours=1, minutes=10)
 
-def run_pnl_calculation():
-    """Connects to DB, calculates P&L, and stores it in the PNL_TABLE in batches by ticker and prediction chunk."""
+def run_pnl_calculation(start_date: str | None = None, end_date: str | None = None):
+    """Connects to DB, calculates P&L, and stores it in the PNL_TABLE in batches using ASOF JOIN >= logic."""
     db_client = None
     try:
         # 1. Initialize Database Connection
@@ -65,6 +67,8 @@ def run_pnl_calculation():
             return
         if not db_client.table_exists(QUOTES_TABLE):
             print(f"Error: Quotes table '{QUOTES_TABLE}' not found. Ensure quote data is available.")
+            # Suggest checking ORDER BY clause if possible
+            # print("Ensure QUOTES_TABLE is ORDER BY (ticker, sip_timestamp) for ASOF JOIN performance.")
             return
 
         # 2. Get list of distinct tickers to process
@@ -89,7 +93,6 @@ def run_pnl_calculation():
         {PNL_ORDER_BY}
         """
         create_result = db_client.execute(create_table_query)
-        # Basic check if creation likely succeeded (handle potential race condition/silent fail)
         if not create_result and not db_client.table_exists(PNL_TABLE):
             print(f"Failed to create table '{PNL_TABLE}'. Aborting.")
             return
@@ -99,12 +102,28 @@ def run_pnl_calculation():
         total_rows_inserted_overall = 0
         start_time_all = datetime.now()
 
+        # Build WHERE clause for date filtering on prediction_timestamp
+        pred_where_clauses = []
+        if start_date:
+            pred_where_clauses.append(f"timestamp >= toDateTime('{start_date} 00:00:00', 'UTC')")
+        if end_date:
+            pred_where_clauses.append(f"timestamp < toDateTime('{end_date}', 'UTC') + INTERVAL 1 DAY")
+
+        prediction_date_filter = ""
+        if pred_where_clauses:
+            prediction_date_filter = " AND ".join(pred_where_clauses)
+            print(f"Applying prediction date filter: {prediction_date_filter}")
+
         for i, ticker in enumerate(tickers_to_process):
             print(f"\n--- Processing ticker {i+1}/{len(tickers_to_process)}: {ticker} ---")
             start_time_ticker = datetime.now()
 
-            # Get total predictions count for this ticker for chunking
-            count_query = f"SELECT count() FROM `{db_name}`.`{PREDICTIONS_TABLE}` WHERE ticker = {{ticker:String}}"
+            # Get total predictions count for this ticker for chunking (WITH DATE FILTER)
+            count_filter = f"ticker = {{ticker:String}}"
+            if prediction_date_filter:
+                count_filter += f" AND {prediction_date_filter}"
+
+            count_query = f"SELECT count() FROM `{db_name}`.`{PREDICTIONS_TABLE}` WHERE {count_filter}"
             count_result = db_client.execute(count_query, params={'ticker': ticker})
             if not count_result or not count_result.result_rows:
                 print(f"Could not get prediction count for ticker {ticker}. Skipping...")
@@ -121,46 +140,58 @@ def run_pnl_calculation():
                 print(f"  Processing chunk: offset {offset}, limit {PREDICTION_CHUNK_SIZE}")
                 start_time_chunk = datetime.now()
 
-                # --- Step 1: Fetch target times for the current chunk --- 
+                # --- Step 1: Fetch target times for the current chunk ---
+                # Fetch only timestamps needed to determine the range
+
+                # Add date filter to the subquery here as well
+                target_times_subquery_filter = f"ticker = {{ticker:String}}"
+                if prediction_date_filter:
+                    target_times_subquery_filter += f" AND {prediction_date_filter}"
+
                 target_times_query = f"""
                 SELECT
-                    timestamp + INTERVAL {ENTRY_OFFSET_SECONDS} SECOND AS target_entry_time,
-                    timestamp + INTERVAL {EXIT_OFFSET_SECONDS} SECOND AS target_exit_time
-                FROM `{db_name}`.`{PREDICTIONS_TABLE}`
-                WHERE ticker = {{ticker:String}}
-                ORDER BY timestamp -- Must match the main query order
-                LIMIT {PREDICTION_CHUNK_SIZE} OFFSET {{offset:UInt64}}
+                    min(timestamp + INTERVAL {ENTRY_OFFSET_SECONDS} SECOND) AS min_entry_time,
+                    max(timestamp + INTERVAL {EXIT_OFFSET_SECONDS} SECOND) AS max_exit_time
+                FROM ( -- Subquery needed to apply LIMIT/OFFSET before min/max
+                    SELECT timestamp
+                    FROM `{db_name}`.`{PREDICTIONS_TABLE}`
+                    WHERE {target_times_subquery_filter} -- Apply ticker and date filter here
+                    ORDER BY timestamp
+                    LIMIT {PREDICTION_CHUNK_SIZE} OFFSET {{offset:UInt64}}
+                )
                 """
-                params_chunk = {'ticker': ticker, 'offset': offset}
-                target_times_df = db_client.query_dataframe(target_times_query, params=params_chunk)
+                params_chunk_range = {'ticker': ticker, 'offset': offset}
+                target_times_df = db_client.query_dataframe(target_times_query, params=params_chunk_range)
 
-                if target_times_df is None or target_times_df.empty:
-                    print(f"  Warning: Could not fetch target times for chunk (offset {offset}). Skipping chunk.")
+                if target_times_df is None or target_times_df.empty or target_times_df.iloc[0]['min_entry_time'] is None:
+                    print(f"  Warning: Could not fetch valid time range for chunk (offset {offset}). Skipping chunk.")
                     offset += PREDICTION_CHUNK_SIZE
                     continue
-                
-                # Ensure columns are datetime objects
-                target_times_df['target_entry_time'] = pd.to_datetime(target_times_df['target_entry_time'], utc=True)
-                target_times_df['target_exit_time'] = pd.to_datetime(target_times_df['target_exit_time'], utc=True)
 
-                # --- Step 2: Determine min/max quote time range for the chunk --- 
-                min_target_time = target_times_df['target_entry_time'].min()
-                max_target_time = target_times_df['target_exit_time'].max()
+                # Ensure results are datetime objects
+                min_target_time = pd.to_datetime(target_times_df.iloc[0]['min_entry_time'], utc=True)
+                max_target_time = pd.to_datetime(target_times_df.iloc[0]['max_exit_time'], utc=True)
 
-                # Add buffer
+                # --- Step 2: Determine time range for filtering quotes ---
                 quote_range_start = min_target_time - QUOTE_TIME_BUFFER
                 quote_range_end = max_target_time + QUOTE_TIME_BUFFER
-                
-                print(f"    Quote Time Range for ASOF JOIN: {quote_range_start} to {quote_range_end}")
+                print(f"    Quote Time Range Filter: {quote_range_start} to {quote_range_end}")
 
-                # --- Step 3: Construct and Execute the INSERT query with time filters --- 
-                # Format timestamps for direct inclusion in the SQL query string
+                # --- Step 3: Construct and Execute INSERT query using ASOF JOIN (>= condition) ---
                 quote_start_str = quote_range_start.strftime('%Y-%m-%d %H:%M:%S.%f')
                 quote_end_str = quote_range_end.strftime('%Y-%m-%d %H:%M:%S.%f')
 
+                # Note: ASOF JOIN requires the right side table/CTE to be ordered correctly.
+
+                # Add date filter to the prediction_chunk CTE definition
+                prediction_chunk_filter = f"ticker = {{ticker:String}}"
+                if prediction_date_filter:
+                    prediction_chunk_filter += f" AND {prediction_date_filter}"
+
                 insert_pnl_query = f"""
                 INSERT INTO `{db_name}`.`{PNL_TABLE}`
-                WITH prediction_times AS (
+                WITH prediction_chunk AS (
+                    -- Select predictions for the current chunk
                     SELECT
                         timestamp AS prediction_timestamp,
                         ticker,
@@ -169,68 +200,65 @@ def run_pnl_calculation():
                         prediction_timestamp + INTERVAL {ENTRY_OFFSET_SECONDS} SECOND AS target_entry_time,
                         prediction_timestamp + INTERVAL {EXIT_OFFSET_SECONDS} SECOND AS target_exit_time
                     FROM `{db_name}`.`{PREDICTIONS_TABLE}`
-                    WHERE ticker = {{ticker:String}}
+                    WHERE {prediction_chunk_filter} -- Apply ticker and date filter here
                     ORDER BY prediction_timestamp
                     LIMIT {PREDICTION_CHUNK_SIZE} OFFSET {{offset:UInt64}}
+                ),
+                quotes_filtered AS (
+                    -- Pre-filter quotes AND ensure correct ORDER BY for ASOF JOIN
+                    SELECT sip_timestamp, ticker, bid_price, ask_price
+                    FROM `{db_name}`.`{QUOTES_TABLE}`
+                    WHERE ticker = {{ticker:String}}
+                      AND sip_timestamp >= '{quote_start_str}'
+                      AND sip_timestamp <= '{quote_end_str}'
+                    ORDER BY ticker, sip_timestamp -- Crucial for ASOF JOIN
                 )
                 SELECT
-                    pt.prediction_timestamp AS prediction_timestamp,
-                    pt.ticker AS ticker,
-                    pt.prediction_raw AS prediction_raw,
-                    pt.prediction_cat AS prediction_cat,
-                    if(pt.prediction_cat IN (3, 4, 5), 1, 0) AS pos_long,
-                    if(pt.prediction_cat IN (0, 1, 2), 1, 0) AS pos_short,
-                    entry_q.timestamp AS entry_timestamp,
-                    exit_q.timestamp AS exit_timestamp,
-                    entry_q.bid_price AS entry_bid_price,
-                    entry_q.ask_price AS entry_ask_price,
-                    exit_q.bid_price AS exit_bid_price,
-                    exit_q.ask_price AS exit_ask_price,
+                    pc.prediction_timestamp,
+                    pc.ticker,
+                    pc.prediction_raw,
+                    pc.prediction_cat,
+                    if(pc.prediction_cat IN (3, 4, 5), 1, 0) AS pos_long,
+                    if(pc.prediction_cat IN (0, 1, 2), 1, 0) AS pos_short,
+
+                    q_entry.sip_timestamp AS entry_timestamp,
+                    q_exit.sip_timestamp AS exit_timestamp,
+
+                    q_entry.bid_price AS entry_bid_price,
+                    q_entry.ask_price AS entry_ask_price,
+                    q_exit.bid_price AS exit_bid_price,
+                    q_exit.ask_price AS exit_ask_price,
+
+                    -- P&L Calculation based on user-specified logic
                     multiIf(
-                        pos_long = 1, exit_q.bid_price - entry_q.ask_price,
-                        pos_short = 1, entry_q.bid_price - exit_q.ask_price,
+                        pos_long = 1, exit_ask_price - entry_bid_price,  -- User request: Exit Ask - Entry Bid
+                        pos_short = 1, entry_ask_price - exit_bid_price, -- User request: Entry Ask - Exit Bid
                         0
                     ) AS price_diff_per_share,
                     {SHARE_SIZE} AS share_size,
                     price_diff_per_share * share_size AS pnl_total
-                FROM prediction_times pt
-                ASOF LEFT JOIN (
-                    SELECT sip_timestamp as timestamp, ticker, bid_price, ask_price
-                    FROM `{db_name}`.`{QUOTES_TABLE}`
-                    WHERE ticker = {{ticker:String}}
-                      AND sip_timestamp >= '{quote_start_str}'  -- Manually formatted string
-                      AND sip_timestamp <= '{quote_end_str}'    -- Manually formatted string
-                    ORDER BY ticker, timestamp
-                 ) AS entry_q
-                ON pt.ticker = entry_q.ticker AND pt.target_entry_time >= entry_q.timestamp
-                ASOF LEFT JOIN (
-                    SELECT sip_timestamp as timestamp, ticker, bid_price, ask_price
-                    FROM `{db_name}`.`{QUOTES_TABLE}`
-                    WHERE ticker = {{ticker:String}}
-                      AND sip_timestamp >= '{quote_start_str}'  -- Manually formatted string
-                      AND sip_timestamp <= '{quote_end_str}'    -- Manually formatted string
-                    ORDER BY ticker, timestamp
-                ) AS exit_q
-                ON pt.ticker = exit_q.ticker AND pt.target_exit_time >= exit_q.timestamp
-                WHERE
-                    entry_q.timestamp IS NOT NULL AND
-                    exit_q.timestamp IS NOT NULL AND
-                    entry_q.ask_price > 0 AND entry_q.bid_price > 0 AND
-                    exit_q.ask_price > 0 AND exit_q.bid_price > 0
+
+                FROM prediction_chunk pc
+                -- Find first quote AT or AFTER target_entry_time
+                ASOF LEFT JOIN quotes_filtered q_entry ON pc.ticker = q_entry.ticker AND pc.target_entry_time <= q_entry.sip_timestamp
+                -- Find first quote AT or AFTER target_exit_time
+                ASOF LEFT JOIN quotes_filtered q_exit ON pc.ticker = q_exit.ticker AND pc.target_exit_time <= q_exit.sip_timestamp
+
+                WHERE -- Filter out rows where ASOF JOIN didn't find a match or prices are invalid
+                    entry_timestamp IS NOT NULL AND exit_timestamp IS NOT NULL AND
+                    entry_bid_price > 0 AND entry_ask_price > 0 AND
+                    exit_bid_price > 0 AND exit_ask_price > 0
                 """
 
-                # Execute the query - NOTE: quote_start/end are now in the string, not params
-                params = {
-                    'ticker': ticker,
-                    'offset': offset
-                    # 'quote_start': quote_range_start, # Removed from params
-                    # 'quote_end': quote_range_end     # Removed from params
-                }
-                print(f"  Executing calculation and insertion for {ticker} chunk (offset {offset})...")
+                # Execute the query
+                params = {'ticker': ticker, 'offset': offset}
+                # Corrected print statement label
+                print(f"  Executing calculation (Revised ASOF JOIN >=) and insertion for {ticker} chunk (offset {offset})...")
                 insert_result = db_client.execute(insert_pnl_query, params=params)
                 end_time_chunk = datetime.now()
 
                 if insert_result:
+                    # We don't get row count from execute, final count happens at the end
                     print(f"  Successfully processed chunk for {ticker} (offset {offset}). Time: {end_time_chunk - start_time_chunk}")
                 else:
                     print(f"  Failed to process chunk for {ticker} (offset {offset}). Check query and logs. Skipping chunk...")
@@ -265,6 +293,25 @@ def run_pnl_calculation():
             db_client.close()
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Calculate P&L based on historical predictions and quotes.")
+    parser.add_argument("--start-date", type=str, help="Start date for P&L calculation range (YYYY-MM-DD). Filters predictions used.")
+    parser.add_argument("--end-date", type=str, help="End date for P&L calculation range (YYYY-MM-DD). Filters predictions used.")
+    args = parser.parse_args()
+
+    # Basic validation
+    if args.start_date and not args.end_date:
+        parser.error("--start-date requires --end-date.")
+    if args.end_date and not args.start_date:
+        parser.error("--end-date requires --start-date.")
+    if args.start_date and args.end_date:
+        try:
+            datetime.strptime(args.start_date, '%Y-%m-%d')
+            datetime.strptime(args.end_date, '%Y-%m-%d')
+            if args.start_date > args.end_date:
+                 parser.error("Start date cannot be after end date.")
+        except ValueError:
+            parser.error("Invalid date format. Please use YYYY-MM-DD.")
+
     print("=== Starting P&L Calculation ===")
-    run_pnl_calculation()
-    print("===============================") 
+    run_pnl_calculation(start_date=args.start_date, end_date=args.end_date)
+    print("===============================")

@@ -41,7 +41,7 @@ async def fetch_quotes(ticker: str, from_date: datetime, to_date: datetime) -> L
         is_live_mode = (to_date - from_date).total_seconds() < 120
         
         # Set timeout based on mode - much longer for historical mode
-        timeout = aiohttp.ClientTimeout(total=5 if is_live_mode else 120)
+        timeout = aiohttp.ClientTimeout(total=5 if is_live_mode else 180)
         
         # Polygon v3 uses nanosecond timestamps
         from_ns = int(from_date.timestamp() * 1_000_000_000)

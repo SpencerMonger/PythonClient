@@ -69,6 +69,7 @@ endpoints/*.env
 *.bak
 *.swp
 *~
+*.csv
 
 # Test coverage
 .coverage

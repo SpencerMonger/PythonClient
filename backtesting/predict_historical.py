@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 from typing import List, Dict, Any
+import argparse
 
 # Assuming db_utils is in the same directory
 from db_utils import ClickHouseClient
@@ -13,8 +14,14 @@ from db_utils import ClickHouseClient
 SOURCE_TABLE = "stock_normalized" # Table with features for prediction
 TARGET_TABLE = "stock_historical_predictions"
 
-# Model and feature paths (relative to this script's location)
-MODEL_DIR = os.path.join(os.path.dirname(__file__), "saved_models")
+# Model and feature paths
+# Calculate path relative to the script's parent directory for portability
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) # Gets the parent dir (e.g., client-python-master)
+MODEL_DIR = os.path.join(BASE_DIR, "saved_models")
+# Ensure the directory exists before proceeding (optional but good practice)
+if not os.path.isdir(MODEL_DIR):
+    raise FileNotFoundError(f"Model directory not found at calculated path: {MODEL_DIR}\nEnsure 'saved_models' exists in the parent directory of 'backtesting'.")
+
 MODEL_FILENAME = "random_forest_stock_prediction_model.pkl" # <<< CHANGE IF YOUR MODEL NAME IS DIFFERENT
 FEATURES_FILENAME = "feature_columns.pkl" # <<< CHANGE IF YOUR FEATURES FILE NAME IS DIFFERENT
 MODEL_PATH = os.path.join(MODEL_DIR, MODEL_FILENAME)
@@ -108,7 +115,7 @@ def prepare_data_for_prediction(df: pd.DataFrame, feature_columns: List[str]) ->
 
     return X
 
-def run_predictions():
+def run_predictions(start_date: str | None = None, end_date: str | None = None):
     """Main function to fetch data, run predictions, and store results."""
     db_client = None
     try:
@@ -131,9 +138,28 @@ def run_predictions():
         print(f"Fetching data from {SOURCE_TABLE} in chunks of {CHUNK_SIZE}...")
         total_rows_processed = 0
         offset = 0
+
+        # Build WHERE clause for date filtering
+        where_clauses = []
+        if start_date:
+            # Assuming start_date is 'YYYY-MM-DD'. Need to include the whole day.
+            where_clauses.append(f"timestamp >= toDateTime('{start_date} 00:00:00', 'UTC')") # Ensure UTC
+        if end_date:
+            # Assuming end_date is 'YYYY-MM-DD'. Need to include the whole day up to 23:59:59.999...
+            # ClickHouse toDateTime handles 'YYYY-MM-DD' and interprets it as the start of the day.
+            # To include the end date, we should compare against the start of the *next* day.
+            where_clauses.append(f"timestamp < toDateTime('{end_date}', 'UTC') + INTERVAL 1 DAY") # Ensure UTC
+
+        where_clause = ""
+        if where_clauses:
+            where_clause = "WHERE " + " AND ".join(where_clauses)
+            print(f"Applying date filter: {where_clause}")
+
         while True:
+            # Construct the query with optional WHERE clause
             query = f"""
             SELECT * FROM `{db_client.database}`.`{SOURCE_TABLE}`
+            {where_clause}
             ORDER BY ticker, timestamp # Ensure consistent order for chunking
             LIMIT {CHUNK_SIZE} OFFSET {offset}
             """
@@ -211,6 +237,26 @@ def run_predictions():
             db_client.close()
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Generate historical predictions based on normalized stock data.")
+    parser.add_argument("--start-date", type=str, help="Start date for prediction range (YYYY-MM-DD). Filters source data.")
+    parser.add_argument("--end-date", type=str, help="End date for prediction range (YYYY-MM-DD). Filters source data.")
+    args = parser.parse_args()
+
+    # Basic validation (can be improved)
+    if args.start_date and not args.end_date:
+        parser.error("--start-date requires --end-date.")
+    if args.end_date and not args.start_date:
+        parser.error("--end-date requires --start-date.")
+    if args.start_date and args.end_date:
+        try:
+            datetime.strptime(args.start_date, '%Y-%m-%d')
+            datetime.strptime(args.end_date, '%Y-%m-%d')
+            if args.start_date > args.end_date:
+                 parser.error("Start date cannot be after end date.")
+        except ValueError:
+            parser.error("Invalid date format. Please use YYYY-MM-DD.")
+
     print("=== Starting Historical Prediction Generation ===")
-    run_predictions()
+    # Pass dates to the main function
+    run_predictions(start_date=args.start_date, end_date=args.end_date)
     print("=================================================") 
