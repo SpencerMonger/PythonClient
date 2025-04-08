@@ -38,8 +38,8 @@ def format_timestamp(ts: pd.Timestamp) -> tuple:
     time_str = ts_utc.strftime('%H:%M:%S') # Using %S for seconds
     return date_str, time_str
 
-def export_pnl_to_csv(size_multiplier: float = 1.0):
-    """Fetches P&L data from ClickHouse in chunks (ordered by time), sorts rows within each chunk, and exports each chunk to a separate CSV file."""
+def export_pnl_to_csv(size_multiplier: float = 1.0, use_time_filter: bool = False, start_date_str: str | None = None, end_date_str: str | None = None, use_random_sample: bool = False, sample_fraction: float = 0.1):
+    """Fetches P&L data from ClickHouse, applies filters, optionally samples, sorts rows within each chunk, and exports each chunk to a separate CSV file."""
     db_client = None
     base_timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     files_written = []
@@ -53,16 +53,64 @@ def export_pnl_to_csv(size_multiplier: float = 1.0):
             print(f"Error: PnL table '{PNL_TABLE}' not found. Please run calculate_pnl.py first.")
             return
 
-        # 3. Get total row count for chunking (with time and category filters applied)
-        time_filter = "(formatDateTime(prediction_timestamp, '%H:%M:%S') >= '13:30:00' AND formatDateTime(prediction_timestamp, '%H:%M:%S') <= '14:30:00') OR (formatDateTime(prediction_timestamp, '%H:%M:%S') >= '19:00:00' AND formatDateTime(prediction_timestamp, '%H:%M:%S') <= '20:00:00')"
+        # 3. Define filters and get total row count for chunking
+        time_filter = "(formatDateTime(prediction_timestamp, '%H:%M:%S') >= '14:30:00' AND formatDateTime(prediction_timestamp, '%H:%M:%S') <= '20:00:00')" # Corresponds to 9am-4pm EST (UTC-4)
         category_filter = "prediction_cat IN (0, 1, 2, 3, 4, 5)"
-        raw_filter = "(prediction_raw >= 3.0 OR prediction_raw <= 2.0)"
-        combined_filter_clause = f"({time_filter}) AND ({category_filter}) AND ({raw_filter})"
-        count_query = f"SELECT count() FROM `{db_name}`.`{PNL_TABLE}` WHERE {combined_filter_clause}"
-        print(f"Counting rows with filter: {combined_filter_clause}...")
+        raw_filter = "(prediction_raw >= 3.2 OR prediction_raw <= 1.8)"
+
+        active_filters = [category_filter, raw_filter]
+
+        # Add time filter if requested
+        if use_time_filter:
+            active_filters.append(time_filter)
+            print("Time filter is ENABLED.")
+        else:
+            print("Time filter is DISABLED.")
+
+        # Add date filters if provided
+        date_filters = []
+        if start_date_str:
+            date_filters.append(f"toDate(prediction_timestamp) >= toDate('{start_date_str}')")
+            print(f"Date filter: Starting from {start_date_str}")
+        if end_date_str:
+            date_filters.append(f"toDate(prediction_timestamp) <= toDate('{end_date_str}')")
+            print(f"Date filter: Ending at {end_date_str}")
+        if date_filters:
+            active_filters.extend(date_filters)
+
+        combined_filter_clause = " AND ".join(f"({f})" for f in active_filters)
+        where_clause = f"WHERE {combined_filter_clause}" if combined_filter_clause else ""
+
+        # --- Construct Base Query Parts ---
+        base_table_expression = f"`{db_name}`.`{PNL_TABLE}`"
+        # Remove subquery logic, sampling will be done in pandas
+        # subquery_for_sampling = f"(SELECT * FROM {base_table_expression} {where_clause})"
+
+        # --- Handle Sampling (Now done post-fetch) ---
+        # count_query_source = base_table_expression
+        # fetch_query_source = base_table_expression
+        # final_where_clause = where_clause
+        # sample_clause = ""
+
+        if use_random_sample:
+            print(f"Random sampling ENABLED: {sample_fraction * 100:.1f}% (Applied after fetch)")
+            if not (0 < sample_fraction <= 1):
+                print("Error: Sample fraction must be between 0 (exclusive) and 1 (inclusive). Aborting.")
+                return
+            # sample_clause = f"SAMPLE {sample_fraction}"
+            # count_query_source = subquery_for_sampling
+            # fetch_query_source = subquery_for_sampling
+            # final_where_clause = ""
+        else:
+            print("Random sampling DISABLED.")
+
+        # --- Final Query Construction (No Sampling Clause) ---
+        # Count query uses only the where_clause
+        count_query = f"SELECT count() FROM {base_table_expression} {where_clause}"
+        print(f"Counting rows with filter: {combined_filter_clause if combined_filter_clause else 'None'}...") # Removed sampling info from log
         count_result = db_client.execute(count_query)
         if not count_result or not count_result.result_rows:
-            print(f"Error: Could not get row count from {PNL_TABLE}.")
+            print(f"Error: Could not get row count from {PNL_TABLE} with applied filters.") # Adjusted error message
             return
         total_rows = count_result.result_rows[0][0]
         if total_rows == 0:
@@ -76,11 +124,11 @@ def export_pnl_to_csv(size_multiplier: float = 1.0):
         while offset < total_rows: # total_rows now reflects the filtered count
             print(f"\nProcessing chunk {part_number} (offset {offset})...")
 
-            # Fetch chunk with combined filters, ordered ONLY by prediction_timestamp
-            print(f"  Fetching rows {offset} to {offset + DB_CHUNK_SIZE - 1} from {PNL_TABLE} (with filters)...", end='', flush=True)
+            # Fetch chunk with combined filters, potential sampling, ordered ONLY by prediction_timestamp
+            print(f"  Fetching rows {offset} to {offset + DB_CHUNK_SIZE - 1} from {PNL_TABLE} (with filters)...", end='', flush=True) # Removed sampling info from log
+            # Construct the fetch query for the current chunk (No Sampling Clause)
             query = f"""
-            SELECT * FROM `{db_name}`.`{PNL_TABLE}`
-            WHERE {combined_filter_clause} -- Apply the combined filter here
+            SELECT * FROM {base_table_expression} {where_clause}
             ORDER BY prediction_timestamp -- Order by time only for fetching
             LIMIT {DB_CHUNK_SIZE} OFFSET {offset}
             """
@@ -95,6 +143,20 @@ def export_pnl_to_csv(size_multiplier: float = 1.0):
             if pnl_df.empty:
                 print("  No more data found (or chunk was empty). Finishing.")
                 break # Exit loop if no data is returned
+
+            # --- Apply Sampling in Pandas (if enabled) --- START
+            if use_random_sample and not pnl_df.empty:
+                original_chunk_size = len(pnl_df)
+                # Use random_state for reproducibility if needed, removing for pure random sampling now
+                # pnl_df = pnl_df.sample(frac=sample_fraction, random_state=1)
+                pnl_df = pnl_df.sample(frac=sample_fraction)
+                print(f"  Applied pandas sampling ({sample_fraction * 100:.1f}%): {original_chunk_size} -> {len(pnl_df)} rows.")
+                if pnl_df.empty:
+                    print("  Chunk became empty after sampling. Skipping processing for this chunk.")
+                    offset += DB_CHUNK_SIZE # Still advance offset based on original fetch size
+                    part_number += 1
+                    continue # Skip to next fetch iteration
+            # --- Apply Sampling in Pandas (if enabled) --- END
 
             print(f"  Fetched {len(pnl_df)} P&L records for this chunk. Transforming data...")
 
@@ -195,11 +257,49 @@ if __name__ == "__main__":
         default=1.0,
         help="Multiplier to apply to the share_size from the PNL table. Default is 1.0."
     )
+    parser.add_argument(
+        "--use-time-filter",
+        action='store_true', # Default is False, flag presence sets it to True
+        help="Enable the time filter (currently 13:00-20:00 UTC / 9am-4pm EST-4). If not specified, the time filter is disabled."
+    )
+    parser.add_argument(
+        "--start-date",
+        type=str,
+        default=None,
+        help="Start date for filtering (inclusive), format YYYY-MM-DD."
+    )
+    parser.add_argument(
+        "--end-date",
+        type=str,
+        default=None,
+        help="End date for filtering (inclusive), format YYYY-MM-DD."
+    )
+    parser.add_argument(
+        "--use-random-sample",
+        action='store_true',
+        help="Enable random sampling of the filtered data."
+    )
+    parser.add_argument(
+        "--sample-fraction",
+        type=float,
+        default=0.1,
+        help="Fraction of data to randomly sample (e.g., 0.5 for 50%). Used only if --use-random-sample is enabled. Must be > 0 and <= 1."
+    )
+
     args = parser.parse_args()
 
     if args.size_multiplier <= 0:
         parser.error("Size multiplier must be a positive number.")
+    if args.use_random_sample and not (0 < args.sample_fraction <= 1):
+         parser.error(f"Sample fraction must be > 0 and <= 1, but got: {args.sample_fraction}")
 
     print("=== Starting Backtest Results CSV Export (Multiple Sorted Files) ===")
-    export_pnl_to_csv(size_multiplier=args.size_multiplier)
+    export_pnl_to_csv(
+        size_multiplier=args.size_multiplier,
+        use_time_filter=args.use_time_filter,
+        start_date_str=args.start_date,
+        end_date_str=args.end_date,
+        use_random_sample=args.use_random_sample,
+        sample_fraction=args.sample_fraction
+    )
     print("===============================================================") 
