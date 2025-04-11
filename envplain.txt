@@ -1,0 +1,11 @@
+# Polygon.io API credentials
+POLYGON_API_KEY="D6XKjstWUpmrkWLLtkI9l2t_saPiIeDx"
+POLYGON_API_URL="http://3.128.134.41"
+
+# ClickHouse configuration
+CLICKHOUSE_HOST=zmykausird.us-west-2.aws.clickhouse.cloud
+CLICKHOUSE_HTTP_PORT=8443
+CLICKHOUSE_USER=default
+CLICKHOUSE_PASSWORD=LflaOU9Hh.QUN
+CLICKHOUSE_DATABASE=stock_data
+CLICKHOUSE_SECURE=true

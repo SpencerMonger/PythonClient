@@ -509,7 +509,6 @@ async def init_master_table(db: ClickHouseDB, from_date: datetime = None, to_dat
         
         # Drop existing tables to ensure clean initialization
         print("Dropping existing master tables...")
-        db.client.command(f"DROP VIEW IF EXISTS {db.database}.stock_normalized_mv")
         db.client.command(f"DROP TABLE IF EXISTS {db.database}.stock_normalized")
         db.client.command(f"DROP TABLE IF EXISTS {db.database}.{config.TABLE_STOCK_MASTER}")
         print("Existing tables dropped successfully")

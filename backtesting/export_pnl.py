@@ -38,8 +38,8 @@ def format_timestamp(ts: pd.Timestamp) -> tuple:
     time_str = ts_utc.strftime('%H:%M:%S') # Using %S for seconds
     return date_str, time_str
 
-def export_pnl_to_csv(size_multiplier: float = 1.0, use_time_filter: bool = False, start_date_str: str | None = None, end_date_str: str | None = None, use_random_sample: bool = False, sample_fraction: float = 0.1):
-    """Fetches P&L data from ClickHouse, applies filters, optionally samples, sorts rows within each chunk, and exports each chunk to a separate CSV file."""
+def export_pnl_to_csv(size_multiplier: float = 1.0, use_time_filter: bool = False, start_date_str: str | None = None, end_date_str: str | None = None, use_random_sample: bool = False, sample_fraction: float = 0.1, max_concurrent_positions: int | None = None):
+    """Fetches P&L data from ClickHouse, applies filters, optionally samples, limits concurrent positions per symbol, sorts rows within each chunk, and exports each chunk to a separate CSV file."""
     db_client = None
     base_timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     files_written = []
@@ -165,6 +165,16 @@ def export_pnl_to_csv(size_multiplier: float = 1.0, use_time_filter: bool = Fals
                 if col in pnl_df.columns:
                     pnl_df[col] = pd.to_datetime(pnl_df[col], utc=True)
 
+            # --- Sort chunk by entry time for concurrency check --- START
+            print(f"  Sorting chunk by entry_timestamp for concurrency check...")
+            pnl_df.sort_values(by='entry_timestamp', inplace=True)
+            # --- Sort chunk by entry time for concurrency check --- END
+
+            # --- Concurrency Limiting Logic --- START
+            active_positions = {} # {symbol: [exit_ts1, exit_ts2, ...]}
+            skipped_concurrency_count = 0
+            # --- Concurrency Limiting Logic --- END
+
             # Transform data for this chunk
             output_rows = []
             output_rows.append(CSV_HEADER) # Add header
@@ -175,12 +185,31 @@ def export_pnl_to_csv(size_multiplier: float = 1.0, use_time_filter: bool = Fals
                 original_quantity = row['share_size']
                 quantity = int(round(original_quantity * size_multiplier))
 
-                entry_date, entry_time = format_timestamp(row['entry_timestamp'])
-                exit_date, exit_time = format_timestamp(row['exit_timestamp'])
+                entry_timestamp = row['entry_timestamp'] # Keep as Timestamp for comparison
+                exit_timestamp = row['exit_timestamp']   # Keep as Timestamp for comparison
+                entry_date, entry_time = format_timestamp(entry_timestamp)
+                exit_date, exit_time = format_timestamp(exit_timestamp)
 
-                if not entry_date or not exit_date:
+                if pd.isna(entry_timestamp) or pd.isna(exit_timestamp) or not entry_date or not exit_date:
                     # print(f"  Warning: Skipping row for ticker {symbol} in chunk {part_number} due to invalid timestamp.")
                     continue
+
+                # --- Concurrency Limiting Logic --- START
+                if max_concurrent_positions is not None:
+                    # Clean up expired positions for this symbol
+                    current_symbol_positions = active_positions.get(symbol, [])
+                    # Keep only positions whose exit time is AFTER the current entry time
+                    active_positions[symbol] = [exit_ts for exit_ts in current_symbol_positions if exit_ts > entry_timestamp]
+
+                    # Check the limit
+                    if len(active_positions[symbol]) >= max_concurrent_positions:
+                        # print(f"  Skipping {symbol} @ {entry_timestamp} due to concurrency limit ({len(active_positions[symbol])} >= {max_concurrent_positions})")
+                        skipped_concurrency_count += 1
+                        continue # Skip this row
+
+                    # If allowed, add this position's exit time to the tracker
+                    active_positions.setdefault(symbol, []).append(exit_timestamp)
+                # --- Concurrency Limiting Logic --- END
 
                 try:
                     entry_ask = float(row['entry_ask_price'])
@@ -285,6 +314,12 @@ if __name__ == "__main__":
         default=0.1,
         help="Fraction of data to randomly sample (e.g., 0.5 for 50%). Used only if --use-random-sample is enabled. Must be > 0 and <= 1."
     )
+    parser.add_argument(
+        "--max-concurrent-positions",
+        type=int,
+        default=None,
+        help="Maximum number of concurrent positions allowed per symbol at any time. If not specified, no limit is applied."
+    )
 
     args = parser.parse_args()
 
@@ -292,14 +327,21 @@ if __name__ == "__main__":
         parser.error("Size multiplier must be a positive number.")
     if args.use_random_sample and not (0 < args.sample_fraction <= 1):
          parser.error(f"Sample fraction must be > 0 and <= 1, but got: {args.sample_fraction}")
+    if args.max_concurrent_positions is not None and args.max_concurrent_positions <= 0:
+        parser.error("Maximum concurrent positions must be a positive integer if specified.")
 
     print("=== Starting Backtest Results CSV Export (Multiple Sorted Files) ===")
+    if args.max_concurrent_positions is not None:
+        print(f"Concurrency Limit ENABLED: Max {args.max_concurrent_positions} positions per symbol.")
+    else:
+        print("Concurrency Limit DISABLED.")
     export_pnl_to_csv(
         size_multiplier=args.size_multiplier,
         use_time_filter=args.use_time_filter,
         start_date_str=args.start_date,
         end_date_str=args.end_date,
         use_random_sample=args.use_random_sample,
-        sample_fraction=args.sample_fraction
+        sample_fraction=args.sample_fraction,
+        max_concurrent_positions=args.max_concurrent_positions
     )
     print("===============================================================") 

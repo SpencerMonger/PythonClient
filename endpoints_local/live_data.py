@@ -154,7 +154,8 @@ async def run_live_data() -> None:
                 data_collection_time = time.time() - execution_start
                 print(f"Data collection phase took {data_collection_time:.2f} seconds")
                 
-                # Adjust budget for model predictions based on time taken
+                # Adjust budget for model predictions based on new expected time
+                # Target completion within ~30 seconds total? Let's give model feed ~5 seconds if possible.
                 time_left = 28.0 - data_collection_time # Use 28s target for safety margin before next minute
                 if time_left > 1.5:
                     print("\n=== Triggering model predictions ===")

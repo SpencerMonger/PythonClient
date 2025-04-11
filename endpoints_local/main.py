@@ -5,13 +5,11 @@ from typing import List
 
 from endpoints.db import ClickHouseDB
 from endpoints import bars, trades, quotes, news, indicators, master, bars_daily, master_v2
-# Import specific creation functions from master_v2
-from endpoints.master_v2 import create_master_table, create_normalized_table
 from endpoints.process_ticker import process_ticker_with_connection
 from endpoints.polygon_client import close_session
 
 # Limit concurrent ticker processing
-MAX_CONCURRENT_TICKERS = 5 # Allow processing all 5 tickers simultaneously
+MAX_CONCURRENT_TICKERS = 1 # Limit to 1 simultaneous ticker
 
 # Helper function to manage semaphore for ticker processing
 async def process_ticker_with_semaphore(sem, ticker, from_date, to_date, store_latest_only):
@@ -77,10 +75,6 @@ async def main(tickers: List[str], from_date: datetime, to_date: datetime, store
         print("\nInitializing core tables...")
         start_time = time.time()
         await init_tables(db)
-        # ADDED: Ensure master and normalized tables from master_v2 exist
-        print("Ensuring master and normalized tables exist...")
-        await create_master_table(db)      # Ensure stock_master table exists (Function from master_v2.py)
-        await create_normalized_table(db)  # Create stock_normalized table
         print(f"Core tables initialized successfully in {time.time() - start_time:.2f} seconds")
         
         # Process tickers concurrently, limited by semaphore

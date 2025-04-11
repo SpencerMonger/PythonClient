@@ -27,7 +27,7 @@ logger.addHandler(file_handler)
 # ---------------------------
 
 # List of tickers to process
-tickers = ["AAPL", "MSFT"]
+tickers = ["AAPL", "MSFT", "GOOG", "AMZN", "META"]
 
 # Mode configuration
 TimeseriesMode = Literal["historical", "live"]

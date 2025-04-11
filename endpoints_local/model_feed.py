@@ -66,21 +66,20 @@ class ModelPredictor:
         """Fetch the latest rows for each ticker from the normalized table (expects UTC timestamps)"""
         print(f"\nFetching latest normalized data for {len(tickers)} tickers...")
 
-        # Query to get only the data points matching the single latest timestamp across all specified tickers
+        # Query to get the latest data for each ticker based on MAX UTC timestamp
         query = f"""
-        WITH LatestOverallTimestamp AS (
-            SELECT MAX(timestamp) as max_ts
+        WITH latest_timestamps AS (
+            SELECT ticker, MAX(timestamp) as max_timestamp
             FROM `{config.CLICKHOUSE_DATABASE}`.`{config.TABLE_STOCK_NORMALIZED}`
             WHERE ticker IN ({', '.join([f"'{ticker}'" for ticker in tickers])})
-              AND timestamp >= (now('UTC') - INTERVAL 5 MINUTE) -- Lookback window
+              AND timestamp >= (now('UTC') - INTERVAL 2 MINUTE) -- Add time filter for efficiency
+            GROUP BY ticker
         )
         SELECT n.*
         FROM `{config.CLICKHOUSE_DATABASE}`.`{config.TABLE_STOCK_NORMALIZED}` n
-        CROSS JOIN LatestOverallTimestamp lot
-        WHERE n.ticker IN ({', '.join([f"'{ticker}'" for ticker in tickers])})
-          AND n.timestamp = lot.max_ts -- Only select rows matching the exact latest timestamp
-          AND lot.max_ts IS NOT NULL -- Ensure we found a timestamp
-        ORDER BY n.ticker -- Order by ticker for consistency
+        INNER JOIN latest_timestamps l
+        ON n.ticker = l.ticker AND n.timestamp = l.max_timestamp
+        ORDER BY n.timestamp DESC
         """
 
         try:

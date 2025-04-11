@@ -16,11 +16,11 @@ class ClickHouseClient:
         load_dotenv(dotenv_path=dotenv_path)
 
         self.host = os.getenv("CLICKHOUSE_HOST")
-        self.port = int(os.getenv("CLICKHOUSE_HTTP_PORT", "8443"))
+        self.port = int(os.getenv("CLICKHOUSE_HTTP_PORT", "8123"))
         self.user = os.getenv("CLICKHOUSE_USER")
         self.password = os.getenv("CLICKHOUSE_PASSWORD")
         self.database = os.getenv("CLICKHOUSE_DATABASE")
-        self.secure = os.getenv("CLICKHOUSE_SECURE", "true").lower() == "true"
+        self.secure = os.getenv("CLICKHOUSE_SECURE", "false").lower() == "true"
         self.client: Optional[clickhouse_connect.driver.Client] = None
 
         if not all([self.host, self.user, self.password, self.database]):
